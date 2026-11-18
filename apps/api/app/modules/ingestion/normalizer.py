@@ -1,5 +1,8 @@
 import re
+from typing import Literal
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from app.modules.ingestion.freshness import is_specific_posting_url
+from app.modules.intelligence.sanitizer import clean_html_to_text
 
 TRACKING_PARAMS = {
     "utm_source",
@@ -77,17 +80,83 @@ def normalize_application_url(raw_url: str) -> str:
         return trimmed.lower().rstrip("/")
 
 
-def normalize_work_mode(raw_mode: str | None, raw_location: str | None = None) -> str:
-    combined = f"{raw_mode or ''} {raw_location or ''}".lower()
-    if any(k in combined for k in ("remote", "wfh", "work from home", "distributed", "anywhere")):
-        if "hybrid" in combined:
+DURATION_EXPLICIT_PATTERN = re.compile(
+    r"\b(\d+\s*(?:to|-|–)\s*\d+\s*(?:months?|weeks?)|\d+\s*(?:months?|weeks?))\b",
+    re.IGNORECASE,
+)
+
+PLACEHOLDER_ORG_NAMES = {
+    "unknown",
+    "unknown organization",
+    "company",
+    "indian tech company",
+    "unverified organization",
+    "not available",
+    "remote company",
+    "remote organization",
+    "tech organization",
+}
+
+
+def normalize_work_mode(
+    raw_mode: str | None,
+    location: str | None = None,
+    title: str | None = None,
+) -> Literal["remote", "hybrid", "onsite", "unknown"]:
+    """
+    Determines workMode strictly from explicit tokens in raw_mode first, then location/title.
+    Never guesses remote/hybrid/onsite when unstated; returns 'unknown' instead.
+    """
+    for source_text in (raw_mode or "", f"{location or ''} {title or ''}"):
+        text = source_text.lower().strip()
+        if not text:
+            continue
+        if re.search(r"\bhybrid\b", text):
             return "hybrid"
-        return "remote"
-    if "hybrid" in combined:
-        return "hybrid"
-    if any(k in combined for k in ("onsite", "on-site", "in-office", "in person", "campus")):
-        return "onsite"
+        if re.search(
+            r"\b(?:remote|work\s+from\s+home|wfh|telecommute|anywhere)\b", text
+        ):
+            return "remote"
+        if re.search(
+            r"\b(?:onsite|on-site|in-office|in\s+office|work\s+from\s+office)\b", text
+        ):
+            return "onsite"
     return "unknown"
+
+
+def extract_explicit_duration(text: str | None) -> str:
+    """
+    Extracts an explicit duration (e.g. '3 to 6 months', '12 weeks') from source text.
+    Returns 'Not available' when no explicit duration is stated.
+    """
+    if not text or not str(text).strip():
+        return "Not available"
+    m = DURATION_EXPLICIT_PATTERN.search(str(text))
+    if m:
+        return re.sub(r"\s+", " ", m.group(1)).strip()
+    return "Not available"
+
+
+def has_minimum_listing_info(
+    title: str | None,
+    org_name: str | None,
+    app_url: str | None,
+    description: str | None,
+) -> bool:
+    """
+    Ensures automated ingestion only admits listings with real title, real organization,
+    specific posting URL, and sufficient source description text (>= 40 chars).
+    """
+    t = (title or "").strip()
+    org = (org_name or "").strip()
+    if len(t) < 4 or len(org) < 2:
+        return False
+    if org.lower() in PLACEHOLDER_ORG_NAMES:
+        return False
+    if not is_specific_posting_url(app_url):
+        return False
+    clean_desc = clean_html_to_text(description or "")
+    return len(clean_desc) >= 40
 
 
 def tokenize_text(text: str) -> set[str]:

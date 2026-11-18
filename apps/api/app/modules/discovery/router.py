@@ -1,3 +1,4 @@
+from typing import Any
 from fastapi import APIRouter, Depends, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -7,6 +8,7 @@ from app.modules.discovery.service import (
     create_and_evaluate_opportunity,
     get_opportunity_for_user,
     list_opportunities_for_user,
+    verify_opportunity_live_status,
 )
 from app.modules.ingestion.url_extractor import extract_job_from_url
 from app.schemas.api_schemas import (
@@ -136,6 +138,15 @@ def get_opportunity_trust_assessment(
 ) -> TrustAssessmentSchema:
     enriched = get_opportunity_for_user(db, current_user.id, opportunity_id)
     return enriched.trustAssessment
+
+
+@router.post("/opportunities/{opportunity_id}/verify-live")
+def verify_opportunity_live(
+    opportunity_id: str,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return verify_opportunity_live_status(db, current_user.id, opportunity_id)
 
 
 @router.get(

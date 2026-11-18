@@ -11,7 +11,8 @@ import type {
   SavedOpportunity,
 } from '@/types/domain';
 
-const STORAGE_VERSION = 'careerradar_prod_v1';
+const STORAGE_VERSION = 'careerradar_prod_v2';
+const LEGACY_STORAGE_VERSION = 'careerradar_prod_v1';
 
 export interface StoredAuthSession {
   accessToken: string;
@@ -83,7 +84,34 @@ function currentDisplayName(): string {
 
 export const localStore = {
   getAuthSession(): StoredAuthSession | null {
-    return readJson<StoredAuthSession | null>(KEYS.authSession, null);
+    const current = readJson<StoredAuthSession | null>(KEYS.authSession, null);
+    if (typeof window !== 'undefined') {
+      const legacyAuthKey = `${LEGACY_STORAGE_VERSION}_auth_session`;
+      const legacyCacheKey = `${LEGACY_STORAGE_VERSION}_cached_enriched_opportunities`;
+      const legacyOppsKey = `${LEGACY_STORAGE_VERSION}_opportunities`;
+      if (!current) {
+        const legacySession = readJson<StoredAuthSession | null>(legacyAuthKey, null);
+        if (legacySession) {
+          writeJson(KEYS.authSession, legacySession);
+          try {
+            window.localStorage.removeItem(legacyAuthKey);
+            window.localStorage.removeItem(legacyCacheKey);
+            window.localStorage.removeItem(legacyOppsKey);
+          } catch {
+            // ignore storage errors
+          }
+          return legacySession;
+        }
+      } else {
+        try {
+          window.localStorage.removeItem(legacyCacheKey);
+          window.localStorage.removeItem(legacyOppsKey);
+        } catch {
+          // ignore storage errors
+        }
+      }
+    }
+    return current;
   },
 
   saveAuthSession(session: StoredAuthSession | null): void {
@@ -210,6 +238,14 @@ export const localStore = {
       window.localStorage.removeItem(KEYS.cachedEnrichedOpportunities);
     } catch {
       // ignore storage errors
+    }
+  },
+
+  removeCachedOpportunity(opportunityId: string): void {
+    const existing = this.getCachedOpportunities();
+    const filtered = existing.filter((item) => item.id !== opportunityId);
+    if (filtered.length !== existing.length) {
+      this.saveCachedOpportunities(filtered);
     }
   },
 

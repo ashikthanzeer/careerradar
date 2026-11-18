@@ -15,6 +15,7 @@ from app.modules.ingestion.freshness import (
     evaluate_opportunity_freshness,
     is_listing_text_closed,
     is_opportunity_expired,
+    is_specific_posting_url,
 )
 from app.modules.ingestion.normalizer import (
     normalize_application_url,
@@ -31,16 +32,16 @@ class RawFeedItemSchema(BaseModel):
     organizationName: str = Field(min_length=2)
     officialWebsite: str | None = None
     recruiterContactEmail: str | None = None
-    location: str = "Remote"
-    workMode: str | None = None
+    location: str = "Not available"
+    workMode: str | None = "unknown"
     opportunityType: str = "internship"
     roleCategory: str = "software_engineering"
     domain: str = "Developer Tools & Cloud"
     compensationMin: int | None = None
     compensationMax: int | None = None
-    compensationCurrency: str | None = "INR"
-    compensationPeriod: str = "monthly"
-    duration: str = "6 months"
+    compensationCurrency: str | None = None
+    compensationPeriod: str = "unknown"
+    duration: str = "Not available"
     postedAt: str | None = None
     deadline: str | None = None
     applicationUrl: str = Field(min_length=8)
@@ -97,7 +98,7 @@ def run_ingestion_batch(
         norm_title = normalize_role_title(item.title)
         norm_org = normalize_organization_name(item.organizationName)
         canonical_url = normalize_application_url(item.applicationUrl)
-        norm_mode = normalize_work_mode(item.workMode, item.location)
+        norm_mode = normalize_work_mode(item.workMode, item.location, item.title)
 
         match = detect_duplicate_opportunity(
             candidate_title=item.title,
@@ -115,6 +116,9 @@ def run_ingestion_batch(
         expired, exp_reason = is_opportunity_expired(
             item.deadline, item.postedAt, reference_iso=now
         )
+        if not expired and not is_specific_posting_url(item.applicationUrl):
+            expired = True
+            exp_reason = "Generic career portal URL without a specific job posting."
         if not expired and is_listing_text_closed(item.title, item.description):
             expired = True
             exp_reason = "Listing indicates applications are closed or the position is no longer available."
@@ -311,7 +315,7 @@ def run_ingestion_batch(
             compensation_currency=item.compensationCurrency,
             compensation_period=item.compensationPeriod,
             duration=item.duration,
-            posted_at=item.postedAt or now,
+            posted_at=item.postedAt,
             deadline=item.deadline,
             application_url=canonical_url,
             recruiter_contact_email=item.recruiterContactEmail,

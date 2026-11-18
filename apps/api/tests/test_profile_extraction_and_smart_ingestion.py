@@ -123,6 +123,29 @@ def test_profile_save_auto_fetch_tier1_shared_catalog_and_daily_limit(
                     ]
                 }
             )
+        if "boards-api.greenhouse.io/v1/boards/razorpay" in url:
+            return _FakeResp(
+                {
+                    "jobs": [
+                        {
+                            "id": 4401,
+                            "title": "Backend Engineering Intern (Python & Go)",
+                            "content": "<p>Build high-throughput payment orchestration APIs in Python, Go, and PostgreSQL.</p>",
+                            "updated_at": recent_iso,
+                            "location": {"name": "Bengaluru, India"},
+                            "absolute_url": "https://boards.greenhouse.io/razorpay/jobs/4401",
+                        },
+                        {
+                            "id": 4402,
+                            "title": "Cloud Platform Intern (Python)",
+                            "content": "<p>Automate Kubernetes and Terraform infrastructure pipelines in Python.</p>",
+                            "updated_at": recent_iso,
+                            "location": None,
+                            "absolute_url": "https://boards.greenhouse.io/razorpay/jobs/4402",
+                        },
+                    ]
+                }
+            )
         if "arbeitnow.com" in url:
             return _FakeResp({"data": []})
         if "themuse.com" in url:
@@ -139,10 +162,10 @@ def test_profile_save_auto_fetch_tier1_shared_catalog_and_daily_limit(
     profile_a = client.get("/api/v1/profile", headers=headers_a).json()
     assert profile_a["triggersRemainingToday"] == 2
 
-    # Saving profile auto-triggers fetch #1 of 2 and persists Tier-1 Cloudflare + 30 native + 20 worldwide jobs
+    # Saving profile auto-triggers fetch #1 of 2 and persists ONLY real verified ATS jobs (zero synthetic top-ups)
     profile_a["nativeCountry"] = "India"
     profile_a["preferredLocations"] = ["Bengaluru", "Remote"]
-    profile_a["preferredDomains"] = ["Developer Tools & Cloud"]
+    profile_a["preferredDomains"] = ["Developer Tools & Cloud", "Fintech & Payments"]
     profile_a["skills"] = [
         {
             "id": "sk_1",
@@ -161,15 +184,24 @@ def test_profile_save_auto_fetch_tier1_shared_catalog_and_daily_limit(
     assert saved_a.json()["triggersUsedToday"] == 1
     assert saved_a.json()["triggersRemainingToday"] == 1
 
-    # Shared catalog check: a different user (Bob) sees the Tier-1 Cloudflare role stored in DB
+    # Shared catalog check: a different user (Bob) sees the real persisted roles ONLY (3 jobs, zero synthetic top-ups)
     headers_b = login_with_oauth(client, provider="google", email="bob.shared@gmail.com")
     bob_opps = client.get("/api/v1/opportunities?pageSize=60", headers=headers_b).json()
-    assert bob_opps["total"] >= 50
+    assert bob_opps["total"] == 3
     assert any(
         item["organization"]["name"] == "Cloudflare"
         and "Systems Software Intern" in item["title"]
         for item in bob_opps["items"]
     )
+    razorpay_missing_loc = next(
+        item
+        for item in bob_opps["items"]
+        if item["organization"]["name"] == "Razorpay" and "Cloud Platform Intern" in item["title"]
+    )
+    assert razorpay_missing_loc["location"] == "Not available"
+    assert razorpay_missing_loc["workMode"] == "unknown"
+    assert razorpay_missing_loc["duration"] == "Not available"
+    assert razorpay_missing_loc["compensationPeriod"] == "unknown"
 
     native_opps = client.get(
         "/api/v1/opportunities?region=native&pageSize=50", headers=headers_a
@@ -177,10 +209,10 @@ def test_profile_save_auto_fetch_tier1_shared_catalog_and_daily_limit(
     worldwide_opps = client.get(
         "/api/v1/opportunities?region=worldwide&pageSize=50", headers=headers_a
     ).json()
-    assert native_opps["total"] >= 30
-    assert worldwide_opps["total"] >= 20
+    assert native_opps["total"] == 1
+    assert worldwide_opps["total"] == 2
 
-    # Trigger #2 of 2 (manual) succeeds, guarantees >= 30 native + >= 20 worldwide, and consumes remaining trigger
+    # Trigger #2 of 2 (manual) succeeds without inventing fake synthetic records
     second_fetch = client.post(
         "/api/v1/ingestion/fetch-for-profile",
         headers=headers_a,
@@ -190,9 +222,9 @@ def test_profile_save_auto_fetch_tier1_shared_catalog_and_daily_limit(
     second_data = second_fetch.json()
     assert second_data["triggered"] is True
     assert second_data["nativeCountry"] == "India"
-    assert second_data["nativeCount"] >= 30
-    assert second_data["worldwideCount"] >= 20
-    assert second_data["report"]["totalProcessed"] >= 50
+    assert second_data["nativeCount"] == 1
+    assert second_data["worldwideCount"] == 2
+    assert second_data["report"]["totalProcessed"] == 3
     assert second_data["triggersUsedToday"] == 2
     assert second_data["triggersRemainingToday"] == 0
 
@@ -389,28 +421,65 @@ def test_mandatory_75_percent_preference_compliance_for_remote_and_city_preferen
     client: TestClient, monkeypatch: Any
 ) -> None:
     """
-    Verifies that >= 75% of fetched opportunities comply with the user's job preferences:
+    Verifies that >= 75% of fetched opportunities comply with the user's job preferences
+    using ONLY real ATS postings (zero synthetic top-ups):
     - When preferredLocations=["Remote"] (even if workModes allows hybrid), >= 75% overall,
-      native, and worldwide jobs must match workMode=="remote", roleCategory, and domain.
-    - When updated to a specific city/mode/track, >= 75% of native jobs immediately re-align.
+      native, and worldwide jobs match workMode=="remote", roleCategory, and domain.
+    - Updating to Hyderabad + hybrid + security + manually fetching real boards re-aligns >= 75% of native jobs.
     """
+    recent_iso = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
     orig_get = httpx.Client.get
 
-    def _empty_get(self: httpx.Client, url: str, **kwargs: Any) -> Any:
+    class _FakeResp:
+        def __init__(self, payload: Any, status_code: int = 200) -> None:
+            self.status_code = status_code
+            self._payload = payload
+            self.text = json.dumps(payload)
+
+        def json(self) -> Any:
+            return self._payload
+
+    _SPECIALTIES = [
+        ("Inference Systems", "CUDA, C++, Triton, and PyTorch model serving kernels"),
+        ("RAG Retrieval", "vector indexing, FastAPI pipelines, and PostgreSQL embeddings"),
+        ("Alignment Research", "RLHF reward modeling, Python evaluation harnesses, and distributed training"),
+        ("Multimodal Vision", "computer vision transformers, ONNX optimization, and Docker containers"),
+        ("Agent Evaluation", "automated benchmark sandboxes, TypeScript dashboards, and LLM telemetry"),
+    ]
+
+    def _board_jobs(slug: str, count: int, title_prefix: str, loc: str) -> dict[str, Any]:
+        return {
+            "jobs": [
+                {
+                    "id": 1000 + i,
+                    "title": f"{title_prefix} - {_SPECIALTIES[i][0]}",
+                    "content": f"<p>Build production software using {_SPECIALTIES[i][1]} with mentorship and testing.</p>",
+                    "updated_at": recent_iso,
+                    "location": {"name": loc},
+                    "absolute_url": f"https://boards.greenhouse.io/{slug}/jobs/{1000 + i}",
+                }
+                for i in range(count)
+            ]
+        }
+
+    def _fake_get(self: httpx.Client, url: str, **kwargs: Any) -> Any:
         if "testserver" in str(url) or str(url).startswith("/"):
             return orig_get(self, url, **kwargs)
+        if "boards-api.greenhouse.io/v1/boards/anthropic" in url:
+            return _FakeResp(_board_jobs("anthropic", 5, "Machine Learning Research Intern", "Remote"))
+        if "boards-api.greenhouse.io/v1/boards/scaleai" in url:
+            return _FakeResp(_board_jobs("scaleai", 5, "Machine Learning Intern", "Remote, India"))
+        if "boards-api.greenhouse.io/v1/boards/snyk" in url:
+            return _FakeResp(
+                _board_jobs("snyk", 5, "Security Engineering Intern (Hybrid)", "Hyderabad, India (Hybrid)")
+            )
+        if "boards-api.greenhouse.io/v1/boards/wiz" in url:
+            return _FakeResp(
+                _board_jobs("wiz", 4, "Application Security Intern (Hybrid)", "Hyderabad, India (Hybrid)")
+            )
+        return _FakeResp({"jobs": [], "data": [], "results": []})
 
-        class _R:
-            status_code = 200
-            text = "{}"
-
-            @staticmethod
-            def json() -> dict[str, Any]:
-                return {"jobs": [], "data": [], "results": []}
-
-        return _R()
-
-    monkeypatch.setattr(httpx.Client, "get", _empty_get)
+    monkeypatch.setattr(httpx.Client, "get", _fake_get)
 
     headers = login_with_oauth(client, provider="google", email="pref.remote@gmail.com")
     profile = client.get("/api/v1/profile", headers=headers).json()
@@ -424,7 +493,11 @@ def test_mandatory_75_percent_preference_compliance_for_remote_and_city_preferen
     assert saved.status_code == 200
 
     all_opps = client.get("/api/v1/opportunities?pageSize=100", headers=headers).json()["items"]
-    assert len(all_opps) >= 50
+    assert len(all_opps) >= 10
+    assert all(
+        not any(src["externalId"].startswith(("native_", "worldwide_")) for src in o["sources"])
+        for o in all_opps
+    )
     compliant_all = [
         o
         for o in all_opps
@@ -440,8 +513,8 @@ def test_mandatory_75_percent_preference_compliance_for_remote_and_city_preferen
     worldwide_opps = client.get(
         "/api/v1/opportunities?region=worldwide&pageSize=100", headers=headers
     ).json()["items"]
-    assert len(native_opps) >= 30
-    assert len(worldwide_opps) >= 20
+    assert len(native_opps) >= 5
+    assert len(worldwide_opps) >= 5
     assert (
         sum(
             1
@@ -465,7 +538,7 @@ def test_mandatory_75_percent_preference_compliance_for_remote_and_city_preferen
         >= 0.75
     )
 
-    # Update profile to Hyderabad + hybrid + Security + Cybersecurity and save again
+    # Update profile to Hyderabad + hybrid + Security + Cybersecurity and manually fetch live boards
     updated_profile = saved.json()
     updated_profile["preferredLocations"] = ["Hyderabad"]
     updated_profile["workModes"] = ["hybrid"]
@@ -474,10 +547,17 @@ def test_mandatory_75_percent_preference_compliance_for_remote_and_city_preferen
     res_updated = client.put("/api/v1/profile", headers=headers, json=updated_profile)
     assert res_updated.status_code == 200
 
+    manual_hyd = client.post(
+        "/api/v1/ingestion/fetch-for-profile",
+        headers=headers,
+        json={"query": "security", "limit": 50, "triggerSource": "manual"},
+    )
+    assert manual_hyd.status_code == 200
+
     native_hyd = client.get(
         "/api/v1/opportunities?region=native&pageSize=100", headers=headers
     ).json()["items"]
-    assert len(native_hyd) >= 30
+    assert len(native_hyd) >= 9
     compliant_hyd = [
         o
         for o in native_hyd
@@ -582,5 +662,102 @@ def test_closed_listings_filtered_and_subsequent_profile_save_avoids_refetch(
     assert second_save.json()["triggersUsedToday"] == 1
     assert second_save.json()["triggersRemainingToday"] == 1
     assert outbound_get_calls == 0
+
+
+def test_zero_hallucination_rejects_generic_urls_and_verifies_live_status(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """
+    Verifies the core Option A + Zero-Hallucination requirements:
+    1. Synthetic top-ups never generate fake items.
+    2. Generic career portal URLs (/jobs/, /careers) are rejected during ingestion.
+    3. Omitted metadata defaults strictly to 'Not available' / 'unknown' / None.
+    4. POST /api/v1/opportunities/{id}/verify-live marks 404/closed postings as 'expired'.
+    """
+    from app.modules.ingestion.company_boards import (
+        build_verified_native_internships,
+        build_verified_worldwide_internships,
+    )
+
+    assert build_verified_native_internships("India", ["Fintech & Payments"], ["software_engineering"]) == []
+    assert build_verified_worldwide_internships(["AI & Machine Learning"], ["machine_learning"]) == []
+
+    headers = login_with_oauth(client, provider="google", email="zero.hallucination@gmail.com")
+    future_date = (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%d")
+
+    batch = [
+        {
+            "sourceName": "Generic Portal 1",
+            "externalId": "gen_1",
+            "title": "Software Engineering Intern",
+            "organizationName": "Razorpay",
+            "applicationUrl": "https://razorpay.com/jobs/",
+            "description": "Build distributed payment orchestration microservices in Go and Python.",
+            "deadline": future_date,
+        },
+        {
+            "sourceName": "Generic Portal 2",
+            "externalId": "gen_2",
+            "title": "Platform Intern",
+            "organizationName": "Juspay",
+            "applicationUrl": "https://juspay.io/careers",
+            "description": "Develop high-concurrency systems in Rust, Go, Linux, and Docker.",
+            "deadline": future_date,
+        },
+        {
+            "sourceName": "Cloudflare Careers (Greenhouse)",
+            "externalId": "gh_cloudflare_7771",
+            "title": "Systems Software Intern",
+            "organizationName": "Cloudflare",
+            "officialWebsite": "https://cloudflare.com",
+            "applicationUrl": "https://boards.greenhouse.io/cloudflare/jobs/7771",
+            "description": "Work with distributed edge proxies using Rust, Go, Linux, and Docker.",
+        },
+    ]
+
+    report = client.post("/api/v1/ingestion/run", json=batch).json()
+    assert report["skippedExpired"] == 2
+    assert report["newOpportunitiesCreated"] == 1
+
+    listed = client.get("/api/v1/opportunities", headers=headers).json()
+    assert listed["total"] == 1
+    item = listed["items"][0]
+    assert item["location"] == "Not available"
+    assert item["workMode"] == "unknown"
+    assert item["duration"] == "Not available"
+    assert item["compensationPeriod"] == "unknown"
+    assert item["compensationCurrency"] is None
+    assert item["postedAt"] is None
+    assert item["analysis"]["compensationSummary"] == "Not available"
+    assert item["analysis"]["durationSummary"] == "Not available"
+    assert item["analysis"]["locationSummary"] == "Not available"
+    assert item["analysis"]["applicationDeadlineSummary"] == "Not available"
+    assert item["analysis"]["eligibilityRequirements"] == ["Not available"]
+    assert item["analysis"]["experienceRequirements"] == "Not available"
+
+    # Simulate the external Greenhouse URL returning HTTP 404 on live verification
+    orig_get = httpx.Client.get
+
+    def _mock_404(self: httpx.Client, url: str, **kwargs: Any) -> Any:
+        if "testserver" in str(url) or str(url).startswith("/"):
+            return orig_get(self, url, **kwargs)
+
+        class _R:
+            status_code = 404
+            text = "Not Found"
+
+        return _R()
+
+    monkeypatch.setattr(httpx.Client, "get", _mock_404)
+    ver_res = client.post(f"/api/v1/opportunities/{item['id']}/verify-live", headers=headers)
+    assert ver_res.status_code == 200
+    ver_body = ver_res.json()
+    assert ver_body["available"] is False
+    assert ver_body["status"] == "expired"
+
+    # Once marked expired, it is no longer returned in active discovery
+    listed_after = client.get("/api/v1/opportunities", headers=headers).json()
+    assert listed_after["total"] == 0
+
 
 

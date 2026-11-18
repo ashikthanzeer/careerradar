@@ -1,5 +1,6 @@
 import math
 import time
+from typing import Any
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -20,6 +21,8 @@ from app.modules.ingestion.deduplicator import detect_duplicate_opportunity
 from app.modules.ingestion.freshness import (
     is_listing_text_closed,
     is_opportunity_expired,
+    purge_synthetic_and_unavailable_opportunities,
+    verify_listing_availability,
 )
 from app.modules.ingestion.normalizer import (
     NON_TECHNICAL_TITLE_PATTERN,
@@ -61,8 +64,14 @@ def _is_opportunity_compliant_for_profile(
     pref_roles = {r.strip().lower() for r in profile.preferredRoles if r.strip()}
     pref_domains = {d.strip().lower() for d in profile.preferredDomains if d.strip()}
 
-    item_loc = (item.location or "").lower()
-    item_mode = (item.workMode or "").lower()
+    item_loc = (item.location or "").strip().lower()
+    item_mode = (item.workMode or "").strip().lower()
+    role_ok = not pref_roles or (item.roleCategory or "").lower() in pref_roles
+    domain_ok = not pref_domains or (item.domain or "").lower() in pref_domains
+
+    loc_is_missing = item_loc in ("not available", "unknown", "")
+    if loc_is_missing and item_mode == "unknown":
+        return role_ok or domain_ok
 
     if pref_locs:
         wants_remote = any("remote" in p for p in pref_locs)
@@ -75,14 +84,24 @@ def _is_opportunity_compliant_for_profile(
         if matches_remote:
             loc_ok = True
         elif matches_city:
-            loc_ok = True if not pref_modes else item_mode in pref_modes
+            loc_ok = (
+                True
+                if (not pref_modes or item_mode == "unknown")
+                else item_mode in pref_modes
+            )
+        elif loc_is_missing and wants_remote:
+            loc_ok = False
+        elif item_mode == "unknown" and not cities:
+            loc_ok = False
         else:
             loc_ok = False
     else:
-        loc_ok = True if not pref_modes else item_mode in pref_modes
+        loc_ok = (
+            True
+            if (not pref_modes or item_mode == "unknown")
+            else item_mode in pref_modes
+        )
 
-    role_ok = not pref_roles or (item.roleCategory or "").lower() in pref_roles
-    domain_ok = not pref_domains or (item.domain or "").lower() in pref_domains
     return loc_ok and (role_ok or domain_ok)
 
 
@@ -414,6 +433,7 @@ def list_opportunities_for_user(
     page: int = 1,
     page_size: int = 12,
 ) -> PaginatedResponseSchema[EnrichedOpportunitySchema]:
+    purge_synthetic_and_unavailable_opportunities(db)
     profile = get_or_create_profile(db, user_id)
     saved_ids = {
         r.opportunity_id
@@ -604,6 +624,55 @@ def get_opportunity_for_user(
     )
     db.commit()
     return result
+
+
+def verify_opportunity_live_status(
+    db: Session,
+    _user_id: str,
+    opportunity_id: str,
+) -> dict[str, Any]:
+    """
+    On-demand live availability check for a stored opportunity.
+    Marks closed, 404/410, or generic-portal listings as 'expired' immediately.
+    """
+    opp = db.scalar(select(Opportunity).where(Opportunity.id == opportunity_id))
+    if opp is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Opportunity '{opportunity_id}' was not found.",
+        )
+
+    is_avail, reason = verify_listing_availability(
+        opp.application_url,
+        title=opp.title,
+        description=opp.description,
+        deadline=opp.deadline,
+        posted_at=opp.posted_at or opp.first_seen_at,
+        perform_http_check=True,
+    )
+    now = utc_now_iso()
+    sources_rows = db.scalars(
+        select(OpportunitySource).where(OpportunitySource.opportunity_id == opp.id)
+    ).all()
+
+    if not is_avail:
+        opp.status = "expired"
+        opp.updated_at = now
+        for src in sources_rows:
+            src.source_status = "unreachable"
+            src.last_checked_at = now
+    else:
+        opp.last_seen_at = now
+        for src in sources_rows:
+            src.last_checked_at = now
+
+    db.commit()
+    return {
+        "opportunityId": opp.id,
+        "available": is_avail,
+        "status": opp.status,
+        "reason": reason,
+    }
 
 
 def create_and_evaluate_opportunity(

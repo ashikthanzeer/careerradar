@@ -14,7 +14,7 @@ export function DeadlineBadge({ deadline, className }: DeadlineBadgeProps) {
     return (
       <span className={cn('inline-flex items-center gap-1 text-xs text-slate-500', className)}>
         <Calendar className="h-3.5 w-3.5" aria-hidden="true" />
-        <span>Rolling / Open</span>
+        <span>Deadline: Not available</span>
       </span>
     );
   }

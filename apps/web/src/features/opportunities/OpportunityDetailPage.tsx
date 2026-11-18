@@ -169,7 +169,14 @@ export function OpportunityDetailPage() {
           </span>
           <span className="inline-flex items-center gap-1.5">
             <Clock className="h-4 w-4 text-slate-400" />
-            <span>{opportunity.duration}</span>
+            <span>
+              {opportunity.duration &&
+              !['not available', 'unknown', 'unspecified'].includes(
+                opportunity.duration.trim().toLowerCase()
+              )
+                ? opportunity.duration
+                : 'Duration: Not available'}
+            </span>
           </span>
           <span className="font-mono font-semibold text-slate-900 tabular-nums">
             {formatCompensation(

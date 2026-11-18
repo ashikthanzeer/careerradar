@@ -4,7 +4,11 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 import httpx
-from app.modules.ingestion.normalizer import normalize_application_url, normalize_work_mode
+from app.modules.ingestion.normalizer import (
+    extract_explicit_duration,
+    normalize_application_url,
+    normalize_work_mode,
+)
 
 
 def _strip_html(raw: str) -> str:
@@ -118,47 +122,61 @@ def _parse_json_ld_job(raw_html: str) -> dict[str, Any] | None:
                 elif isinstance(addr, str):
                     location_str = addr
 
-            if str(node.get("jobLocationType", "")).upper() == "TELECOMMUTE":
-                location_str = location_str or "Remote"
+            title_clean = _strip_html(str(node.get("title") or ""))
+            desc_clean = _strip_html(str(node.get("description") or ""))
+            loc_type = str(node.get("jobLocationType", "")).upper()
+            if "TELECOMMUTE" in loc_type:
                 work_mode = "remote"
+                location_str = location_str or "Remote"
             else:
-                work_mode = normalize_work_mode("", location_str)
+                work_mode = normalize_work_mode(None, location_str, title_clean)
 
             comp_min: int | None = None
-            comp_curr: str = "INR"
-            comp_period: str = "monthly"
+            comp_max: int | None = None
+            comp_curr: str | None = None
+            comp_period: str = "unknown"
             salary = node.get("baseSalary")
             if isinstance(salary, dict):
-                comp_curr = str(salary.get("currency") or "USD")
-                if comp_curr not in ("INR", "USD", "EUR"):
-                    comp_curr = "USD"
+                raw_curr = str(salary.get("currency") or "").strip().upper()
+                if raw_curr in ("INR", "USD", "EUR"):
+                    comp_curr = raw_curr
                 val = salary.get("value")
                 if isinstance(val, dict):
-                    raw_num = val.get("minValue") or val.get("value") or val.get("maxValue")
-                    if raw_num is not None:
+                    raw_min = val.get("minValue") or val.get("value")
+                    raw_max = val.get("maxValue") or val.get("value")
+                    if raw_min is not None:
                         try:
-                            comp_min = int(float(raw_num))
+                            comp_min = int(float(raw_min))
                         except Exception:
                             comp_min = None
-                    unit = str(val.get("unitText") or "").upper()
-                    if unit == "HOUR":
-                        comp_period = "hourly"
-                    elif unit == "MONTH":
-                        comp_period = "monthly"
-                    else:
-                        comp_period = "total_stipend"
+                    if raw_max is not None:
+                        try:
+                            comp_max = int(float(raw_max))
+                        except Exception:
+                            comp_max = comp_min
+                    if comp_min is not None:
+                        comp_curr = comp_curr or "USD"
+                        unit = str(val.get("unitText") or "").upper()
+                        if unit == "HOUR":
+                            comp_period = "hourly"
+                        elif unit == "MONTH":
+                            comp_period = "monthly"
+                        else:
+                            comp_period = "total_stipend"
 
             return {
-                "title": _strip_html(str(node.get("title") or "")),
+                "title": title_clean,
                 "organizationName": _strip_html(org_name),
                 "officialWebsite": str(org_site) if org_site else None,
-                "location": location_str or "Remote",
+                "location": location_str or ("Remote" if work_mode == "remote" else "Not available"),
                 "workMode": work_mode,
                 "compensationMin": comp_min,
+                "compensationMax": comp_max,
                 "compensationCurrency": comp_curr,
                 "compensationPeriod": comp_period,
+                "duration": extract_explicit_duration(f"{title_clean} {desc_clean}"),
                 "deadline": str(node.get("validThrough") or "")[:10] or None,
-                "description": _strip_html(str(node.get("description") or "")),
+                "description": desc_clean,
             }
     return None
 
@@ -382,38 +400,70 @@ def extract_job_from_url(
         "title": "",
         "organizationName": "",
         "officialWebsite": None,
-        "location": "Remote",
-        "workMode": "remote",
+        "location": "Not available",
+        "workMode": "unknown",
         "compensationMin": None,
-        "compensationCurrency": "INR",
-        "compensationPeriod": "monthly",
-        "duration": "6 months",
+        "compensationMax": None,
+        "compensationCurrency": None,
+        "compensationPeriod": "unknown",
+        "duration": "Not available",
         "deadline": None,
         "description": "",
     }
+
+    def _is_missing_field(val: Any) -> bool:
+        if val is None:
+            return True
+        s = str(val).strip()
+        return s == "" or s.lower() in ("not available", "unknown", "unspecified")
 
     if html_content:
         ld_job = _parse_json_ld_job(html_content)
         dom_job = _parse_platform_dom(html_content, source_name)
         if ld_job:
-            extracted.update({k: v for k, v in ld_job.items() if v})
+            for k, v in ld_job.items():
+                if not _is_missing_field(v):
+                    extracted[k] = v
         for k in ("title", "organizationName", "location", "description"):
-            if not extracted.get(k) and dom_job.get(k):
+            if _is_missing_field(extracted.get(k)) and not _is_missing_field(dom_job.get(k)):
                 extracted[k] = dom_job[k]
 
     slug_data = _parse_url_slug_fallback(raw_url, source_name)
-    if not extracted["title"] and slug_data["title"]:
+    if _is_missing_field(extracted["title"]) and slug_data["title"]:
         extracted["title"] = slug_data["title"]
-    if not extracted["organizationName"] and slug_data["organizationName"]:
+    if _is_missing_field(extracted["organizationName"]) and slug_data["organizationName"]:
         extracted["organizationName"] = slug_data["organizationName"]
-    if (not extracted["location"] or extracted["location"] == "Remote") and slug_data["location"]:
+    if _is_missing_field(extracted["location"]) and slug_data["location"]:
         extracted["location"] = slug_data["location"]
 
     combined_text = f"{extracted['title']} {extracted['description']} {extracted['location']}"
     role_category, domain = _infer_role_and_domain(combined_text)
     opp_type = _infer_opportunity_type(combined_text)
-    if not extracted.get("workMode"):
-        extracted["workMode"] = normalize_work_mode("", extracted["location"])
+
+    if extracted.get("workMode") in (None, "", "unknown"):
+        extracted["workMode"] = normalize_work_mode(
+            None,
+            "" if _is_missing_field(extracted["location"]) else extracted["location"],
+            extracted["title"],
+        )
+
+    if _is_missing_field(extracted.get("duration")):
+        extracted["duration"] = extract_explicit_duration(
+            f"{extracted['title']} {extracted['description']}"
+        )
+
+    if (
+        extracted["compensationMin"] is None
+        and extracted["compensationPeriod"] == "unknown"
+        and re.search(r"\bunpaid\b", combined_text, flags=re.IGNORECASE)
+    ):
+        extracted["compensationPeriod"] = "unpaid"
+
+    final_location = (
+        extracted["location"]
+        if not _is_missing_field(extracted["location"])
+        else ("Remote" if extracted["workMode"] == "remote" else "Not available")
+    )
 
     partial = len(str(extracted.get("description", "")).strip()) < 30
     if partial:
@@ -431,9 +481,10 @@ def extract_job_from_url(
         "opportunityType": opp_type,
         "roleCategory": role_category,
         "domain": domain,
-        "location": extracted["location"] or "Remote",
+        "location": final_location,
         "workMode": extracted["workMode"],
         "compensationMin": extracted["compensationMin"],
+        "compensationMax": extracted["compensationMax"],
         "compensationCurrency": extracted["compensationCurrency"],
         "compensationPeriod": extracted["compensationPeriod"],
         "duration": extracted["duration"],

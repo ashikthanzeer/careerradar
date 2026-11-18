@@ -19,7 +19,7 @@ export function formatCompensation(
   period: 'monthly' | 'total_stipend' | 'hourly' | 'unpaid' | 'unknown'
 ): string {
   if (period === 'unpaid') return 'Unpaid';
-  if (min === null && max === null) return 'Not disclosed';
+  if (period === 'unknown' || (min === null && max === null)) return 'Not available';
 
   const symbol = currency === 'INR' ? '₹' : currency === 'USD' ? '$' : currency === 'EUR' ? '€' : '';
   const fmt = (val: number) =>
@@ -42,9 +42,9 @@ export function formatCompensation(
 }
 
 export function formatDateShort(isoDate: string | null): string {
-  if (!isoDate) return 'No deadline specified';
+  if (!isoDate) return 'Not available';
   const date = new Date(isoDate);
-  if (Number.isNaN(date.getTime())) return 'Unknown date';
+  if (Number.isNaN(date.getTime())) return 'Not available';
   return date.toLocaleDateString('en-US', {
     month: 'short',
     day: 'numeric',
@@ -84,10 +84,16 @@ export function formatCleanText(raw: string | null | undefined): string {
 }
 
 export function formatLocationWithMode(location: string, workMode: WorkMode): string {
-  const cleanLoc = formatCleanText(location) || 'Remote';
+  const cleanLoc = formatCleanText(location).trim();
+  const hasLoc =
+    Boolean(cleanLoc) &&
+    !['not available', 'unknown', 'unspecified', 'n/a'].includes(cleanLoc.toLowerCase());
   const modeLabel = WORK_MODE_LABELS[workMode];
+
+  if (!hasLoc && workMode === 'unknown') return 'Not available';
+  if (!hasLoc) return modeLabel;
+  if (workMode === 'unknown') return cleanLoc;
   if (
-    workMode === 'unknown' ||
     cleanLoc.toLowerCase().includes(modeLabel.toLowerCase()) ||
     (workMode === 'remote' && cleanLoc.toLowerCase().includes('remote'))
   ) {
@@ -126,7 +132,7 @@ export const WORK_MODE_LABELS: Record<WorkMode, string> = {
   remote: 'Remote',
   hybrid: 'Hybrid',
   onsite: 'On-site',
-  unknown: 'Unspecified',
+  unknown: 'Not available',
 };
 
 export const TRUST_LABEL_META: Record<

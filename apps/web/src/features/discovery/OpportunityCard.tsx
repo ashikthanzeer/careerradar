@@ -94,7 +94,14 @@ export function OpportunityCard({
           </span>
           <span className="inline-flex items-center gap-1">
             <Clock className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
-            <span>{opportunity.duration}</span>
+            <span>
+              {opportunity.duration &&
+              !['not available', 'unknown', 'unspecified'].includes(
+                opportunity.duration.trim().toLowerCase()
+              )
+                ? opportunity.duration
+                : 'Duration: Not available'}
+            </span>
           </span>
           <span className="font-mono font-semibold text-slate-800 tabular-nums">
             {formatCompensation(
@@ -152,11 +159,11 @@ export function OpportunityCard({
       <div className="mt-4 pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500">
           <DeadlineBadge deadline={opportunity.deadline} />
-          {opportunity.postedAt && (
-            <span className="hidden sm:inline tabular-nums">
-              Posted {formatDateShort(opportunity.postedAt)}
-            </span>
-          )}
+          <span className="hidden sm:inline tabular-nums">
+            {opportunity.postedAt
+              ? `Posted ${formatDateShort(opportunity.postedAt)}`
+              : 'Posted: Not available'}
+          </span>
           <a
             href={opportunity.applicationUrl}
             target="_blank"

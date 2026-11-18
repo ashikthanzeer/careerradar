@@ -365,25 +365,32 @@ export function extractStructuredIntelligence(
     opportunityId: opportunity.id,
     analysisType: 'rule_and_schema_validated',
     shortSummary:
-      sentences[0] ?? `${cleanTitle} opportunity in ${locationSummary}.`,
+      sentences[0] ??
+      (locationSummary !== 'Not available'
+        ? `${cleanTitle} (${locationSummary}).`
+        : `${cleanTitle}.`),
     responsibilities:
       sentences.slice(0, 4).length > 0
         ? sentences.slice(0, 4)
-        : ['Review original listing description for role responsibilities.'],
+        : ['Not available'],
     requiredSkills,
     preferredSkills,
-    eligibilityRequirements: [
-      'Refer to original listing for exact academic year and work authorization requirements.',
-    ],
-    experienceRequirements: 'Early-career / student level (extracted from listing context)',
+    eligibilityRequirements: ['Not available'],
+    experienceRequirements: 'Not available',
     technologies: skills.map((s) => s.skillName),
     compensationSummary:
-      opportunity.compensationMin !== null || opportunity.compensationMax !== null
-        ? `${opportunity.compensationCurrency ?? ''} ${opportunity.compensationMin ?? opportunity.compensationMax} (${opportunity.compensationPeriod})`
-        : 'Unknown (Not stated in listing)',
-    durationSummary: opportunity.duration || 'Unknown duration',
+      opportunity.compensationPeriod === 'unpaid'
+        ? 'Unpaid'
+        : opportunity.compensationMin !== null || opportunity.compensationMax !== null
+          ? `${opportunity.compensationCurrency ?? ''} ${opportunity.compensationMin ?? opportunity.compensationMax} (${opportunity.compensationPeriod})`.trim()
+          : 'Not available',
+    durationSummary:
+      opportunity.duration &&
+      !['not available', 'unknown', 'unspecified'].includes(opportunity.duration.trim().toLowerCase())
+        ? opportunity.duration
+        : 'Not available',
     locationSummary,
-    applicationDeadlineSummary: opportunity.deadline ?? 'Rolling / Not specified',
+    applicationDeadlineSummary: opportunity.deadline ?? 'Not available',
     ambiguitiesOrMissingInfo: ambiguities,
     learningValueAssessment: {
       rating: sentences.length >= 3 && skills.length >= 2 ? 'high' : 'uncertain',

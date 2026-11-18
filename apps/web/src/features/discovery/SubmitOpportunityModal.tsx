@@ -85,7 +85,7 @@ export interface JobPrefillData {
   location?: string;
   workMode?: CreateOpportunityInput['workMode'];
   compensationMin?: number | null;
-  compensationCurrency?: 'INR' | 'USD' | 'EUR';
+  compensationCurrency?: 'INR' | 'USD' | 'EUR' | null;
   compensationPeriod?: CreateOpportunityInput['compensationPeriod'];
   duration?: string;
   deadline?: string | null;
@@ -132,12 +132,12 @@ export function SubmitOpportunityModal({
       opportunityType: 'internship',
       roleCategory: 'software_engineering',
       domain: 'Developer Tools & Cloud',
-      location: 'Remote',
-      workMode: 'remote',
+      location: 'Not available',
+      workMode: 'unknown',
       compensationMin: '',
       compensationCurrency: 'INR',
-      compensationPeriod: 'monthly',
-      duration: '6 months',
+      compensationPeriod: 'unknown',
+      duration: 'Not available',
       deadline: '',
       applicationUrl: 'https://',
       sourceName: 'LinkedIn',
@@ -155,16 +155,16 @@ export function SubmitOpportunityModal({
         opportunityType: initialPrefill.opportunityType ?? 'internship',
         roleCategory: initialPrefill.roleCategory ?? 'software_engineering',
         domain: initialPrefill.domain ?? 'Developer Tools & Cloud',
-        location: initialPrefill.location ?? 'Remote',
-        workMode: initialPrefill.workMode ?? 'remote',
+        location: initialPrefill.location ?? 'Not available',
+        workMode: initialPrefill.workMode ?? 'unknown',
         compensationMin:
           initialPrefill.compensationMin !== null &&
           initialPrefill.compensationMin !== undefined
             ? String(initialPrefill.compensationMin)
             : '',
         compensationCurrency: initialPrefill.compensationCurrency ?? 'INR',
-        compensationPeriod: initialPrefill.compensationPeriod ?? 'monthly',
-        duration: initialPrefill.duration ?? '6 months',
+        compensationPeriod: initialPrefill.compensationPeriod ?? 'unknown',
+        duration: initialPrefill.duration ?? 'Not available',
         deadline: initialPrefill.deadline ?? '',
         applicationUrl: initialPrefill.applicationUrl ?? 'https://',
         sourceName: initialPrefill.sourceName ?? 'LinkedIn',
@@ -199,6 +199,13 @@ export function SubmitOpportunityModal({
       if (extracted.roleCategory) setValue('roleCategory', extracted.roleCategory);
       if (extracted.domain) setValue('domain', extracted.domain);
       if (extracted.sourceName) setValue('sourceName', extracted.sourceName);
+      if (extracted.duration) setValue('duration', extracted.duration);
+      if (extracted.compensationPeriod) {
+        setValue('compensationPeriod', extracted.compensationPeriod);
+      }
+      if (extracted.compensationCurrency) {
+        setValue('compensationCurrency', extracted.compensationCurrency);
+      }
       if (extracted.compensationMin !== null && extracted.compensationMin !== undefined) {
         setValue('compensationMin', String(extracted.compensationMin));
       }
@@ -218,6 +225,7 @@ export function SubmitOpportunityModal({
       values.compensationMin && values.compensationMin.trim() !== ''
         ? Number(values.compensationMin)
         : null;
+    const validComp = parsedComp !== null && !Number.isNaN(parsedComp) ? parsedComp : null;
 
     await onSubmitOpportunity({
       title: values.title,
@@ -229,10 +237,10 @@ export function SubmitOpportunityModal({
       domain: values.domain,
       location: values.location,
       workMode: values.workMode,
-      compensationMin: Number.isNaN(parsedComp) ? null : parsedComp,
-      compensationMax: Number.isNaN(parsedComp) ? null : parsedComp,
-      compensationCurrency: values.compensationCurrency,
-      compensationPeriod: values.compensationPeriod,
+      compensationMin: validComp,
+      compensationMax: validComp,
+      compensationCurrency: validComp !== null ? values.compensationCurrency : null,
+      compensationPeriod: validComp !== null && values.compensationPeriod === 'unknown' ? 'monthly' : values.compensationPeriod,
       duration: values.duration,
       deadline: values.deadline || undefined,
       applicationUrl: values.applicationUrl,
@@ -365,6 +373,7 @@ export function SubmitOpportunityModal({
             error={errors.workMode?.message}
             {...register('workMode')}
           >
+            <option value="unknown">Not available</option>
             <option value="remote">Remote</option>
             <option value="hybrid">Hybrid</option>
             <option value="onsite">In-Office / On-site</option>

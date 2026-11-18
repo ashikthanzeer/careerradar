@@ -145,6 +145,11 @@ def test_url_extractor_linkedin_and_internshala_slug_fallbacks_when_walled() -> 
     assert linkedin_res["sourceName"] == "LinkedIn"
     assert linkedin_res["title"] == "Backend Software Engineer Intern"
     assert linkedin_res["organizationName"] == "Stripe"
+    assert linkedin_res["location"] == "Not available"
+    assert linkedin_res["workMode"] == "unknown"
+    assert linkedin_res["duration"] == "Not available"
+    assert linkedin_res["compensationPeriod"] == "unknown"
+    assert linkedin_res["compensationCurrency"] is None
     assert linkedin_res["partialExtraction"] is True
     assert "LinkedIn" in linkedin_res["extractionNotice"]
 
@@ -156,6 +161,9 @@ def test_url_extractor_linkedin_and_internshala_slug_fallbacks_when_walled() -> 
     assert "Machine Learning Internship" in internshala_res["title"]
     assert internshala_res["organizationName"] == "Razorpay"
     assert internshala_res["location"] == "Bengaluru"
+    assert internshala_res["workMode"] == "unknown"
+    assert internshala_res["duration"] == "Not available"
+    assert internshala_res["compensationPeriod"] == "unknown"
     assert internshala_res["partialExtraction"] is True
 
 

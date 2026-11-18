@@ -2,27 +2,29 @@ from datetime import datetime, timezone
 import re
 from typing import Any
 import httpx
-from sqlalchemy import inspect, select, text
+from sqlalchemy import func, inspect, select, text
 from sqlalchemy.orm import Session
 from app.models.entities import (
     CareerProfile,
-    OpportunitySource,
+    Opportunity,
     Skill,
     UserFetchState,
     UserSkill,
     utc_now_iso,
 )
 from app.modules.ingestion.company_boards import (
-    build_verified_native_internships,
-    build_verified_worldwide_internships,
     fetch_internshala_internships,
     fetch_tier1_company_jobs,
 )
 from app.modules.ingestion.freshness import (
     is_listing_text_closed,
     is_opportunity_expired,
+    is_specific_posting_url,
+    purge_synthetic_and_unavailable_opportunities,
 )
 from app.modules.ingestion.normalizer import (
+    extract_explicit_duration,
+    has_minimum_listing_info,
     is_native_country_location,
     is_technical_career_role,
     normalize_work_mode,
@@ -263,15 +265,18 @@ def fetch_live_public_jobs(
     worldwide_min: int = DEFAULT_WORLDWIDE_MIN,
 ) -> dict[str, Any]:
     """
-    Two-bucket geo-aware internship fetcher:
-      - Bucket 1 (Native Country): minimum 30 internships in user's native country (e.g., India)
-      - Bucket 2 (Worldwide): minimum 20 internships/early-career roles across the rest of the world
-    Enforces >= 80% (>= 75% mandatory) compliance with stated location/work-mode, role, and domain preferences.
+    Geo-aware live job & internship fetcher (Option A strict real-availability policy):
+      - Collects 100% real, verified-open roles across Internshala, Tier-1 ATS boards
+        (Greenhouse, Ashby, Lever), Arbeitnow, The Muse, Himalayas, and Remotive.
+      - Never fabricates synthetic listings when feeds return fewer matches.
+      - Leaves omitted workMode/location/duration/compensation as 'unknown' / 'Not available'.
+      - Prioritizes user-preferred locations, work modes, roles, and domains.
     """
     native_compliant: list[RawFeedItemSchema] = []
     native_exploratory: list[RawFeedItemSchema] = []
     ww_compliant: list[RawFeedItemSchema] = []
     ww_exploratory: list[RawFeedItemSchema] = []
+    seen_urls: set[str] = set()
     sources_queried: list[str] = []
     warnings: list[str] = []
 
@@ -279,51 +284,52 @@ def fetch_live_public_jobs(
     roles = preferred_roles or ["software_engineering"]
     pref_locs = preferred_locations if preferred_locations is not None else ["Remote"]
     pref_modes = work_modes if work_modes is not None else ["remote", "hybrid"]
-    pref_skills = preferred_skills or []
     terms = query_terms or [t.strip().lower() for t in query.split() if len(t.strip()) >= 2]
-    eff_native_min = max(30, native_min)
-    eff_worldwide_min = max(20, worldwide_min)
-    native_non_compliant_cap = int(eff_native_min * 0.15)
-    ww_non_compliant_cap = int(eff_worldwide_min * 0.15)
+    eff_limit = max(50, limit, native_min + worldwide_min)
 
     def _add_partitioned(item: RawFeedItemSchema) -> None:
+        if not is_specific_posting_url(item.applicationUrl):
+            return
+        if is_listing_text_closed(item.title, item.description):
+            return
+        norm_url = item.applicationUrl.strip().rstrip("/").lower()
+        if norm_url in seen_urls:
+            return
+        seen_urls.add(norm_url)
+
         compliant = _is_item_preference_compliant(
             item, pref_locs, pref_modes, roles, domains
         )
         if is_native_country_location(item.location, native_country):
             if compliant:
-                if item.applicationUrl not in {it.applicationUrl for it in native_compliant}:
-                    native_compliant.append(item)
-            elif len(native_exploratory) < native_non_compliant_cap:
-                if item.applicationUrl not in {it.applicationUrl for it in native_exploratory}:
-                    native_exploratory.append(item)
+                native_compliant.append(item)
+            else:
+                native_exploratory.append(item)
         else:
             if compliant:
-                if item.applicationUrl not in {it.applicationUrl for it in ww_compliant}:
-                    ww_compliant.append(item)
-            elif len(ww_exploratory) < ww_non_compliant_cap:
-                if item.applicationUrl not in {it.applicationUrl for it in ww_exploratory}:
-                    ww_exploratory.append(item)
+                ww_compliant.append(item)
+            else:
+                ww_exploratory.append(item)
 
-    with httpx.Client(timeout=4.0, follow_redirects=True) as http:
-        # 1. Native country Internshala public feed (for India)
+    with httpx.Client(timeout=4.5, follow_redirects=True) as http:
+        # 1. Native country Internshala public feed (with detail-page verification)
         if native_country.strip().lower() == "india":
             ins_items, ins_sources, ins_warnings = fetch_internshala_internships(
                 http=http,
                 preferred_roles=roles,
-                max_items=eff_native_min,
+                max_items=12,
             )
             for it in ins_items:
                 _add_partitioned(it)
             sources_queried.extend(ins_sources)
             warnings.extend(ins_warnings)
 
-        # 2. Tier-1 Company ATS Career Boards (Greenhouse, Ashby, Lever)
+        # 2. Tier-1 Company ATS Career Boards (Greenhouse, Ashby, Lever — guaranteed open requisitions)
         t1_items, t1_sources, t1_warnings = fetch_tier1_company_jobs(
             http=http,
             preferred_domains=domains,
             query_terms=terms,
-            max_total=max(limit, 48),
+            max_total=max(eff_limit, 100),
             native_country=native_country,
         )
         for it in t1_items:
@@ -331,59 +337,65 @@ def fetch_live_public_jobs(
         sources_queried.extend(t1_sources)
         warnings.extend(t1_warnings)
 
-        # 3. Arbeitnow Public API (capped per source)
-        if len(ww_compliant) + len(ww_exploratory) < eff_worldwide_min:
-            try:
-                arb_res = http.get("https://www.arbeitnow.com/api/job-board-api")
-                if arb_res.status_code == 200:
-                    sources_queried.append("Arbeitnow Public API")
-                    added_here = 0
-                    for job in arb_res.json().get("data", []):
-                        if added_here >= 15:
-                            break
-                        title = _strip_tags(str(job.get("title") or ""))
-                        desc = _strip_tags(str(job.get("description") or ""))
-                        if (
-                            len(desc) < 25
-                            or not is_technical_career_role(title, job.get("tags") or [])
-                            or is_listing_text_closed(title, desc)
-                        ):
-                            continue
-                        if terms and not any(t in f"{title} {desc[:1200]}".lower() for t in terms):
-                            continue
-                        posted_at = _parse_iso_or_epoch(job.get("created_at"))
-                        expired, _ = is_opportunity_expired(None, posted_at)
-                        if expired:
-                            continue
-                        role_cat, dom = _map_role_and_domain(title, job.get("tags") or [])
-                        _add_partitioned(
-                            RawFeedItemSchema(
-                                sourceName="Arbeitnow Public API",
-                                externalId=f"arbeitnow_{job.get('slug')}",
-                                title=title,
-                                organizationName=str(job.get("company_name") or "Company"),
-                                location=str(job.get("location") or "Remote"),
-                                workMode="remote"
-                                if job.get("remote")
-                                else normalize_work_mode("", str(job.get("location") or "")),
-                                opportunityType="internship" if "intern" in title.lower() else "graduate",
-                                roleCategory=role_cat,
-                                domain=dom,
-                                compensationCurrency="EUR",
-                                compensationPeriod="unknown",
-                                duration="Programme / Full-time",
-                                postedAt=posted_at,
-                                deadline=None,
-                                applicationUrl=str(job.get("url") or "https://www.arbeitnow.com"),
-                                description=desc[:4000],
-                                httpReachable=True,
-                            )
+        # 3. Arbeitnow Public API
+        try:
+            arb_res = http.get("https://www.arbeitnow.com/api/job-board-api")
+            if arb_res.status_code == 200:
+                sources_queried.append("Arbeitnow Public API")
+                added_here = 0
+                for job in arb_res.json().get("data", []):
+                    if added_here >= 25:
+                        break
+                    title = _strip_tags(str(job.get("title") or ""))
+                    desc = _strip_tags(str(job.get("description") or ""))
+                    org_name = str(job.get("company_name") or "").strip()
+                    app_url = str(job.get("url") or "").strip()
+                    if (
+                        not has_minimum_listing_info(title, org_name, app_url, desc)
+                        or not is_technical_career_role(title, job.get("tags") or [])
+                        or is_listing_text_closed(title, desc)
+                    ):
+                        continue
+                    if terms and not any(t in f"{title} {desc[:1200]}".lower() for t in terms):
+                        continue
+                    posted_at = _parse_iso_or_epoch(job.get("created_at"))
+                    expired, _ = is_opportunity_expired(None, posted_at)
+                    if expired:
+                        continue
+                    raw_loc = str(job.get("location") or "").strip()
+                    loc_str = raw_loc or "Not available"
+                    work_mode = (
+                        "remote"
+                        if job.get("remote") is True
+                        else normalize_work_mode(None, raw_loc, title)
+                    )
+                    role_cat, dom = _map_role_and_domain(title, job.get("tags") or [])
+                    _add_partitioned(
+                        RawFeedItemSchema(
+                            sourceName="Arbeitnow Public API",
+                            externalId=f"arbeitnow_{job.get('slug')}",
+                            title=title,
+                            organizationName=org_name,
+                            location=loc_str,
+                            workMode=work_mode,
+                            opportunityType="internship" if "intern" in title.lower() else "graduate",
+                            roleCategory=role_cat,
+                            domain=dom,
+                            compensationCurrency=None,
+                            compensationPeriod="unknown",
+                            duration=extract_explicit_duration(f"{title} {desc}"),
+                            postedAt=posted_at,
+                            deadline=None,
+                            applicationUrl=app_url,
+                            description=desc[:4000],
+                            httpReachable=True,
                         )
-                        added_here += 1
-            except Exception as exc:
-                warnings.append(f"Arbeitnow API unavailable ({type(exc).__name__})")
+                    )
+                    added_here += 1
+        except Exception as exc:
+            warnings.append(f"Arbeitnow API unavailable ({type(exc).__name__})")
 
-        # 4. The Muse Public API (India hubs + Remote + global entry-level/internships)
+        # 4. The Muse Public API
         muse_queries = (
             [
                 {"category": "Software Engineering", "location": "Bengaluru, India", "page": 1},
@@ -401,19 +413,21 @@ def fetch_live_public_jobs(
         )
         muse_added = 0
         for m_params in muse_queries:
-            if muse_added >= 25:
+            if muse_added >= 30:
                 break
             try:
                 muse_res = http.get("https://www.themuse.com/api/public/jobs", params=m_params)
                 if muse_res.status_code == 200:
                     sources_queried.append("The Muse Public API")
                     for job in muse_res.json().get("results", []):
-                        if muse_added >= 25:
+                        if muse_added >= 30:
                             break
                         title = _strip_tags(str(job.get("name") or ""))
                         desc = _strip_tags(str(job.get("contents") or ""))
+                        comp_name = str((job.get("company") or {}).get("name") or "").strip()
+                        app_url = str((job.get("refs") or {}).get("landing_page") or "").strip()
                         if (
-                            len(desc) < 25
+                            not has_minimum_listing_info(title, comp_name, app_url, desc)
                             or not is_technical_career_role(title)
                             or is_listing_text_closed(title, desc)
                         ):
@@ -422,9 +436,13 @@ def fetch_live_public_jobs(
                         expired, _ = is_opportunity_expired(None, posted_at)
                         if expired:
                             continue
-                        locs = [str(l.get("name") or "") for l in (job.get("locations") or []) if l.get("name")]
-                        loc_str = ", ".join(locs[:2]) or m_params.get("location", "Remote")
-                        comp_name = str((job.get("company") or {}).get("name") or "Tech Organization")
+                        locs = [
+                            str(l.get("name") or "").strip()
+                            for l in (job.get("locations") or [])
+                            if l.get("name")
+                        ]
+                        raw_loc = ", ".join(locs[:2])
+                        loc_str = raw_loc or "Not available"
                         cats = [str(c.get("name") or "") for c in (job.get("categories") or [])]
                         role_cat, dom = _map_role_and_domain(title, cats)
                         _add_partitioned(
@@ -434,19 +452,16 @@ def fetch_live_public_jobs(
                                 title=title,
                                 organizationName=comp_name,
                                 location=loc_str,
-                                workMode=normalize_work_mode("", loc_str),
+                                workMode=normalize_work_mode(None, raw_loc, title),
                                 opportunityType="internship" if "intern" in title.lower() else "graduate",
                                 roleCategory=role_cat or roles[0],
                                 domain=dom,
-                                compensationCurrency="USD",
+                                compensationCurrency=None,
                                 compensationPeriod="unknown",
-                                duration="Early Career / Internship" if "intern" in title.lower() else "Full-time",
+                                duration=extract_explicit_duration(f"{title} {desc}"),
                                 postedAt=posted_at,
                                 deadline=None,
-                                applicationUrl=str(
-                                    (job.get("refs") or {}).get("landing_page")
-                                    or "https://www.themuse.com/jobs"
-                                ),
+                                applicationUrl=app_url,
                                 description=desc[:4000],
                                 httpReachable=True,
                             )
@@ -455,152 +470,139 @@ def fetch_live_public_jobs(
             except Exception as exc:
                 warnings.append(f"The Muse API unavailable ({type(exc).__name__})")
 
-        # 5. Himalayas Remote Jobs API
-        if len(ww_compliant) + len(ww_exploratory) < eff_worldwide_min:
+        # 5. Himalayas Public Jobs API
+        try:
+            him_res = http.get("https://himalayas.app/jobs/api", params={"limit": 30})
+            if him_res.status_code == 200:
+                sources_queried.append("Himalayas Public API")
+                added_here = 0
+                for job in him_res.json().get("jobs", []):
+                    if added_here >= 20:
+                        break
+                    title = _strip_tags(str(job.get("title") or ""))
+                    desc = _strip_tags(str(job.get("description") or job.get("excerpt") or ""))
+                    org_name = str(job.get("companyName") or "").strip()
+                    app_url = str(job.get("applicationLink") or "").strip()
+                    if (
+                        not has_minimum_listing_info(title, org_name, app_url, desc)
+                        or not is_technical_career_role(title, job.get("categories") or [])
+                        or is_listing_text_closed(title, desc)
+                    ):
+                        continue
+                    if terms and not any(t in f"{title} {desc[:1200]}".lower() for t in terms):
+                        continue
+                    posted_at = _parse_iso_or_epoch(job.get("pubDate"))
+                    deadline = _parse_iso_or_epoch(job.get("expiryDate"))
+                    expired, _ = is_opportunity_expired(deadline, posted_at)
+                    if expired:
+                        continue
+                    raw_locs = [
+                        str(x).strip()
+                        for x in (job.get("locationRestrictions") or [])
+                        if str(x).strip()
+                    ]
+                    raw_loc = ", ".join(raw_locs)
+                    loc_str = raw_loc or "Not available"
+                    role_cat, dom = _map_role_and_domain(title, job.get("categories") or [])
+                    _add_partitioned(
+                        RawFeedItemSchema(
+                            sourceName="Himalayas Public API",
+                            externalId=f"himalayas_{job.get('guid') or title[:24]}",
+                            title=title,
+                            organizationName=org_name,
+                            location=loc_str,
+                            workMode=normalize_work_mode(None, raw_loc, title),
+                            opportunityType="internship" if "intern" in title.lower() else "graduate",
+                            roleCategory=role_cat,
+                            domain=dom,
+                            compensationCurrency=None,
+                            compensationPeriod="unknown",
+                            duration=extract_explicit_duration(f"{title} {desc}"),
+                            postedAt=posted_at,
+                            deadline=deadline,
+                            applicationUrl=app_url,
+                            description=desc[:4000],
+                            httpReachable=True,
+                        )
+                    )
+                    added_here += 1
+        except Exception as exc:
+            warnings.append(f"Himalayas API unavailable ({type(exc).__name__})")
+
+        # 6. Remotive Public Jobs API (explicitly remote technical roles)
+        rem_added = 0
+        for rem_params in (
+            {"search": query, "limit": 25},
+            {"category": "software-dev", "limit": 20},
+        ):
+            if rem_added >= 25:
+                break
             try:
-                him_res = http.get("https://himalayas.app/jobs/api", params={"limit": 30})
-                if him_res.status_code == 200:
-                    sources_queried.append("Himalayas Public API")
-                    added_here = 0
-                    for job in him_res.json().get("jobs", []):
-                        if added_here >= 15:
+                rem_res = http.get(
+                    "https://remotive.com/api/remote-jobs",
+                    params=rem_params,
+                )
+                if rem_res.status_code == 200:
+                    sources_queried.append("Remotive Public API")
+                    for job in rem_res.json().get("jobs", []):
+                        if rem_added >= 25:
                             break
                         title = _strip_tags(str(job.get("title") or ""))
-                        desc = _strip_tags(str(job.get("description") or job.get("excerpt") or ""))
+                        desc = _strip_tags(str(job.get("description") or ""))
+                        org_name = str(job.get("company_name") or "").strip()
+                        app_url = str(job.get("url") or "").strip()
                         if (
-                            len(desc) < 25
-                            or not is_technical_career_role(title, job.get("categories") or [])
+                            not has_minimum_listing_info(title, org_name, app_url, desc)
+                            or not is_technical_career_role(title, job.get("tags") or [])
                             or is_listing_text_closed(title, desc)
                         ):
                             continue
-                        if terms and not any(t in f"{title} {desc[:1200]}".lower() for t in terms):
-                            continue
-                        posted_at = _parse_iso_or_epoch(job.get("pubDate"))
-                        deadline = _parse_iso_or_epoch(job.get("expiryDate"))
-                        expired, _ = is_opportunity_expired(deadline, posted_at)
+                        posted_at = _parse_iso_or_epoch(job.get("publication_date"))
+                        expired, _ = is_opportunity_expired(None, posted_at)
                         if expired:
                             continue
-                        role_cat, dom = _map_role_and_domain(title, job.get("categories") or [])
+                        role_cat, dom = _map_role_and_domain(title, job.get("tags") or [])
+                        loc_str = (
+                            str(job.get("candidate_required_location") or "").strip()
+                            or "Remote"
+                        )
                         _add_partitioned(
                             RawFeedItemSchema(
-                                sourceName="Himalayas Public API",
-                                externalId=f"himalayas_{job.get('guid') or title[:24]}",
+                                sourceName="Remotive Public API",
+                                externalId=f"remotive_{job.get('id')}",
                                 title=title,
-                                organizationName=str(job.get("companyName") or "Remote Organization"),
-                                location=", ".join(job.get("locationRestrictions") or []) or "Remote",
+                                organizationName=org_name,
+                                location=loc_str,
                                 workMode="remote",
                                 opportunityType="internship" if "intern" in title.lower() else "graduate",
                                 roleCategory=role_cat,
                                 domain=dom,
-                                compensationCurrency="USD",
+                                compensationCurrency=None,
                                 compensationPeriod="unknown",
-                                duration="Programme / Full-time",
+                                duration=extract_explicit_duration(f"{title} {desc}"),
                                 postedAt=posted_at,
-                                deadline=deadline,
-                                applicationUrl=str(job.get("applicationLink") or "https://himalayas.app/jobs"),
+                                deadline=None,
+                                applicationUrl=app_url,
                                 description=desc[:4000],
                                 httpReachable=True,
                             )
                         )
-                        added_here += 1
+                        rem_added += 1
             except Exception as exc:
-                warnings.append(f"Himalayas API unavailable ({type(exc).__name__})")
+                warnings.append(f"Remotive API unavailable ({type(exc).__name__})")
 
-        # 6. Remotive Public Jobs API (remote technical roles)
-        if len(ww_compliant) + len(ww_exploratory) < eff_worldwide_min or any(
-            "remote" in p.lower() for p in pref_locs
-        ):
-            rem_added = 0
-            for rem_params in (
-                {"search": query, "limit": 25},
-                {"category": "software-dev", "limit": 20},
-            ):
-                if rem_added >= 20:
-                    break
-                try:
-                    rem_res = http.get(
-                        "https://remotive.com/api/remote-jobs",
-                        params=rem_params,
-                    )
-                    if rem_res.status_code == 200:
-                        sources_queried.append("Remotive Public API")
-                        for job in rem_res.json().get("jobs", []):
-                            if rem_added >= 20:
-                                break
-                            title = _strip_tags(str(job.get("title") or "Software Engineer"))
-                            desc = _strip_tags(str(job.get("description") or ""))
-                            if (
-                                len(desc) < 25
-                                or not is_technical_career_role(title, job.get("tags") or [])
-                                or is_listing_text_closed(title, desc)
-                            ):
-                                continue
-                            posted_at = _parse_iso_or_epoch(job.get("publication_date"))
-                            expired, _ = is_opportunity_expired(None, posted_at)
-                            if expired:
-                                continue
-                            role_cat, dom = _map_role_and_domain(title, job.get("tags") or [])
-                            _add_partitioned(
-                                RawFeedItemSchema(
-                                    sourceName="Remotive Public API",
-                                    externalId=f"remotive_{job.get('id')}",
-                                    title=title,
-                                    organizationName=str(job.get("company_name") or "Remote Company"),
-                                    location=str(job.get("candidate_required_location") or "Remote"),
-                                    workMode="remote",
-                                    opportunityType="internship" if "intern" in title.lower() else "graduate",
-                                    roleCategory=role_cat,
-                                    domain=dom,
-                                    compensationCurrency="USD",
-                                    compensationPeriod="unknown",
-                                    duration="Full-time / Programme",
-                                    postedAt=posted_at,
-                                    deadline=None,
-                                    applicationUrl=str(job.get("url") or "https://remotive.com"),
-                                    description=desc[:4000],
-                                    httpReachable=True,
-                                )
-                            )
-                            rem_added += 1
-                except Exception as exc:
-                    warnings.append(f"Remotive API unavailable ({type(exc).__name__})")
+    def _select_bucket(
+        compliant_list: list[RawFeedItemSchema],
+        exploratory_list: list[RawFeedItemSchema],
+        bucket_cap: int,
+    ) -> list[RawFeedItemSchema]:
+        if len(compliant_list) >= 4:
+            allowed_exp = len(compliant_list) // 3
+            return (compliant_list + exploratory_list[:allowed_exp])[:bucket_cap]
+        return (compliant_list + exploratory_list)[:bucket_cap]
 
-    # 7. Guarantee minimum 30 native-country internships and minimum 20 worldwide internships
-    # with >= 80% (>= 75% mandatory) aligned to the user's location, work mode, role, and domain preferences.
-    if len(native_compliant) + len(native_exploratory) < eff_native_min:
-        native_topups = build_verified_native_internships(
-            native_country=native_country,
-            preferred_domains=domains,
-            preferred_roles=roles,
-            preferred_locations=pref_locs,
-            work_modes=pref_modes,
-            preferred_skills=pref_skills,
-            target_count=eff_native_min + 2,
-        )
-        sources_queried.append(f"Tier-1 {native_country} Career Portals")
-        for topup in native_topups:
-            if len(native_compliant) + len(native_exploratory) >= eff_native_min:
-                break
-            _add_partitioned(topup)
-
-    if len(ww_compliant) + len(ww_exploratory) < eff_worldwide_min:
-        ww_topups = build_verified_worldwide_internships(
-            preferred_domains=domains,
-            preferred_roles=roles,
-            preferred_locations=pref_locs,
-            work_modes=pref_modes,
-            preferred_skills=pref_skills,
-            target_count=eff_worldwide_min + 4,
-        )
-        sources_queried.append("Tier-1 Worldwide Career Portals")
-        for topup in ww_topups:
-            if len(ww_compliant) + len(ww_exploratory) >= eff_worldwide_min:
-                break
-            if not is_native_country_location(topup.location, native_country):
-                _add_partitioned(topup)
-
-    native_selected = (native_compliant + native_exploratory)[: max(eff_native_min, 30)]
-    ww_selected = (ww_compliant + ww_exploratory)[: max(eff_worldwide_min, 20)]
+    native_selected = _select_bucket(native_compliant, native_exploratory, max(native_min, 40))
+    ww_selected = _select_bucket(ww_compliant, ww_exploratory, max(worldwide_min, 40))
     collected = native_selected + ww_selected
     compliant_count = sum(
         1
@@ -609,6 +611,7 @@ def fetch_live_public_jobs(
     )
     compliance_pct = round((compliant_count / len(collected)) * 100) if collected else 100
 
+    purge_synthetic_and_unavailable_opportunities(db)
     report: IngestionRunReportSchema = run_ingestion_batch(db, items=collected)
     return {
         "query": query,
@@ -697,39 +700,15 @@ def trigger_profile_job_fetch_for_user(
     }
 
 
-def realign_stored_catalog_to_preferences(db: Session, user_id: str) -> None:
+def realign_stored_catalog_to_preferences(db: Session, user_id: str) -> int:
     """
-    Re-aligns any existing local/portal catalog entries in DB to the user's updated preferences
-    WITHOUT making any outbound HTTP requests or consuming daily fetch quota.
+    Cleans any stale/synthetic records and returns the count of active verified
+    opportunities currently stored in the catalog without making outbound HTTP requests.
     """
-    existing_ext_ids = {
-        s.external_id
-        for s in db.scalars(select(OpportunitySource)).all()
-        if s.external_id.startswith(("native_", "worldwide_"))
-    }
-    if not existing_ext_ids:
-        return
-
-    ctx = _derive_profile_search_context(db, user_id)
-    native_topups = build_verified_native_internships(
-        native_country=ctx["native_country"],
-        preferred_domains=ctx["preferred_domains"],
-        preferred_roles=ctx["preferred_roles"],
-        preferred_locations=ctx["preferred_locations"],
-        work_modes=ctx["work_modes"],
-        preferred_skills=ctx["skill_names"],
-        target_count=DEFAULT_NATIVE_MIN + 2,
+    purge_synthetic_and_unavailable_opportunities(db)
+    active_count = db.scalar(
+        select(func.count())
+        .select_from(Opportunity)
+        .where(Opportunity.status != "expired")
     )
-    ww_topups = build_verified_worldwide_internships(
-        preferred_domains=ctx["preferred_domains"],
-        preferred_roles=ctx["preferred_roles"],
-        preferred_locations=ctx["preferred_locations"],
-        work_modes=ctx["work_modes"],
-        preferred_skills=ctx["skill_names"],
-        target_count=DEFAULT_WORLDWIDE_MIN + 4,
-    )
-    to_update = [
-        item for item in [*native_topups, *ww_topups] if item.externalId in existing_ext_ids
-    ]
-    if to_update:
-        run_ingestion_batch(db, items=to_update)
+    return int(active_count or 0)

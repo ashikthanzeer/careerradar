@@ -1,16 +1,15 @@
 from datetime import datetime, timezone
-import html as html_lib
-import math
 import re
 from typing import Any, Literal
 import httpx
 from pydantic import BaseModel
-from app.models.entities import utc_now_iso
 from app.modules.ingestion.freshness import (
     is_listing_text_closed,
     is_opportunity_expired,
 )
 from app.modules.ingestion.normalizer import (
+    extract_explicit_duration,
+    has_minimum_listing_info,
     is_native_country_location,
     is_technical_career_role,
     normalize_work_mode,
@@ -221,6 +220,86 @@ TIER1_COMPANY_BOARDS: list[Tier1CompanyBoard] = [
         domain="Distributed Systems",
         default_role="systems_infrastructure",
     ),
+    Tier1CompanyBoard(
+        name="Cockroach Labs",
+        ats="greenhouse",
+        slug="cockroachlabs",
+        website="https://www.cockroachlabs.com",
+        domain="Distributed Systems",
+        default_role="systems_infrastructure",
+    ),
+    Tier1CompanyBoard(
+        name="Coinbase",
+        ats="greenhouse",
+        slug="coinbase",
+        website="https://www.coinbase.com",
+        domain="Fintech & Payments",
+        default_role="software_engineering",
+    ),
+    Tier1CompanyBoard(
+        name="Discord",
+        ats="greenhouse",
+        slug="discord",
+        website="https://discord.com",
+        domain="Distributed Systems",
+        default_role="systems_infrastructure",
+    ),
+    Tier1CompanyBoard(
+        name="Dropbox",
+        ats="greenhouse",
+        slug="dropbox",
+        website="https://www.dropbox.com",
+        domain="Developer Tools & Cloud",
+        default_role="software_engineering",
+    ),
+    Tier1CompanyBoard(
+        name="Airbyte",
+        ats="ashby",
+        slug="airbyte",
+        website="https://airbyte.com",
+        domain="Data Engineering",
+        default_role="data_science",
+    ),
+    Tier1CompanyBoard(
+        name="PostHog",
+        ats="ashby",
+        slug="posthog",
+        website="https://posthog.com",
+        domain="Developer Tools & Cloud",
+        default_role="software_engineering",
+    ),
+    Tier1CompanyBoard(
+        name="Temporal",
+        ats="ashby",
+        slug="temporal",
+        website="https://temporal.io",
+        domain="Distributed Systems",
+        default_role="systems_infrastructure",
+    ),
+    Tier1CompanyBoard(
+        name="Langfuse",
+        ats="ashby",
+        slug="langfuse",
+        website="https://langfuse.com",
+        domain="AI & Machine Learning",
+        default_role="machine_learning",
+    ),
+    Tier1CompanyBoard(
+        name="Retell AI",
+        ats="ashby",
+        slug="retellai",
+        website="https://www.retellai.com",
+        domain="AI & Machine Learning",
+        default_role="machine_learning",
+    ),
+    Tier1CompanyBoard(
+        name="Composio",
+        ats="ashby",
+        slug="composio",
+        website="https://composio.dev",
+        domain="AI & Machine Learning",
+        default_role="machine_learning",
+    ),
 ]
 
 
@@ -279,7 +358,7 @@ def _infer_role(title: str, fallback: str) -> str:
     return fallback
 
 
-def _select_boards_for_domains(preferred_domains: list[str], max_boards: int = 12) -> list[Tier1CompanyBoard]:
+def _select_boards_for_domains(preferred_domains: list[str], max_boards: int = 34) -> list[Tier1CompanyBoard]:
     pref_set = {d.strip().lower() for d in preferred_domains if d.strip()}
     prioritized = [b for b in TIER1_COMPANY_BOARDS if b.domain.lower() in pref_set]
     rest = [b for b in TIER1_COMPANY_BOARDS if b.domain.lower() not in pref_set]
@@ -290,15 +369,16 @@ def fetch_tier1_company_jobs(
     http: httpx.Client,
     preferred_domains: list[str],
     query_terms: list[str],
-    max_total: int = 40,
+    max_total: int = 80,
     native_country: str = "India",
 ) -> tuple[list[RawFeedItemSchema], list[str], list[str]]:
     """
     Fetches live roles directly from Tier-1 company ATS career boards (Greenhouse, Ashby, Lever),
     prioritizing native-country hubs, preferred domains, and internship tracks.
-    Filters out closed postings, expired deadlines, and listings > 90 days old.
+    Strictly preserves 'Not available' / 'unknown' for omitted location, duration, compensation, and workMode.
+    Filters out closed postings, expired deadlines, generic URLs, and listings > 90 days old.
     """
-    boards = _select_boards_for_domains(preferred_domains, max_boards=20)
+    boards = _select_boards_for_domains(preferred_domains, max_boards=34)
     terms = [t.strip().lower() for t in query_terms if len(t.strip()) >= 2]
     collected: list[RawFeedItemSchema] = []
     sources_queried: list[str] = []
@@ -319,15 +399,20 @@ def fetch_tier1_company_jobs(
                     for job in res.json().get("jobs", []):
                         title = str(job.get("title") or "").strip()
                         desc = _clean_html(str(job.get("content") or ""))
-                        if len(title) < 3 or len(desc) < 25:
+                        job_url = str(job.get("absolute_url") or "").strip()
+                        if not has_minimum_listing_info(title, board.name, job_url, desc):
                             continue
                         if not _matches_terms(title, desc, terms):
                             continue
-                        posted_at = _normalize_timestamp(job.get("updated_at") or job.get("first_published"))
+                        posted_at = _normalize_timestamp(
+                            job.get("updated_at") or job.get("first_published")
+                        )
                         expired, _ = is_opportunity_expired(None, posted_at)
                         if expired:
                             continue
-                        loc = str((job.get("location") or {}).get("name") or "Remote")
+                        raw_loc = str((job.get("location") or {}).get("name") or "").strip()
+                        loc = raw_loc or "Not available"
+                        work_mode = normalize_work_mode(None, raw_loc, title)
                         board_items.append(
                             RawFeedItemSchema(
                                 sourceName=f"{board.name} Careers (Greenhouse)",
@@ -336,18 +421,18 @@ def fetch_tier1_company_jobs(
                                 organizationName=board.name,
                                 officialWebsite=board.website,
                                 location=loc,
-                                workMode=normalize_work_mode("", f"{title} {loc}"),
+                                workMode=work_mode,
                                 opportunityType="internship"
                                 if "intern" in title.lower()
                                 else ("research" if "research" in title.lower() else "graduate"),
                                 roleCategory=_infer_role(title, board.default_role),
                                 domain=board.domain,
-                                compensationCurrency="USD",
+                                compensationCurrency=None,
                                 compensationPeriod="unknown",
-                                duration="Internship / Early Career" if "intern" in title.lower() else "Full-time / Programme",
+                                duration=extract_explicit_duration(f"{title} {desc}"),
                                 postedAt=posted_at,
                                 deadline=None,
-                                applicationUrl=str(job.get("absolute_url") or board.website),
+                                applicationUrl=job_url,
                                 description=desc[:4000],
                                 httpReachable=True,
                             )
@@ -361,7 +446,8 @@ def fetch_tier1_company_jobs(
                         desc = _clean_html(
                             str(job.get("descriptionPlain") or job.get("descriptionHtml") or "")
                         )
-                        if len(title) < 3 or len(desc) < 25:
+                        job_url = str(job.get("jobUrl") or job.get("applyUrl") or "").strip()
+                        if not has_minimum_listing_info(title, board.name, job_url, desc):
                             continue
                         if not _matches_terms(title, desc, terms):
                             continue
@@ -369,7 +455,17 @@ def fetch_tier1_company_jobs(
                         expired, _ = is_opportunity_expired(None, posted_at)
                         if expired:
                             continue
-                        loc = str(job.get("location") or "Remote")
+                        raw_loc = str(job.get("location") or "").strip()
+                        loc = raw_loc or "Not available"
+                        raw_wp = str(job.get("workplaceType") or "").strip().lower()
+                        if job.get("isRemote") is True or raw_wp == "remote":
+                            work_mode = "remote"
+                        elif raw_wp == "hybrid":
+                            work_mode = "hybrid"
+                        elif raw_wp in ("onsite", "on-site"):
+                            work_mode = "onsite"
+                        else:
+                            work_mode = normalize_work_mode(raw_wp or None, raw_loc, title)
                         board_items.append(
                             RawFeedItemSchema(
                                 sourceName=f"{board.name} Careers (Ashby)",
@@ -378,20 +474,18 @@ def fetch_tier1_company_jobs(
                                 organizationName=board.name,
                                 officialWebsite=board.website,
                                 location=loc,
-                                workMode="remote"
-                                if job.get("isRemote")
-                                else normalize_work_mode("", loc),
+                                workMode=work_mode,
                                 opportunityType="internship"
                                 if "intern" in title.lower()
                                 else "graduate",
                                 roleCategory=_infer_role(title, board.default_role),
                                 domain=board.domain,
-                                compensationCurrency="USD",
+                                compensationCurrency=None,
                                 compensationPeriod="unknown",
-                                duration="Internship / Programme" if "intern" in title.lower() else "Full-time",
+                                duration=extract_explicit_duration(f"{title} {desc}"),
                                 postedAt=posted_at,
                                 deadline=None,
-                                applicationUrl=str(job.get("jobUrl") or job.get("applyUrl") or board.website),
+                                applicationUrl=job_url,
                                 description=desc[:4000],
                                 httpReachable=True,
                             )
@@ -406,7 +500,8 @@ def fetch_tier1_company_jobs(
                     for job in res.json():
                         title = str(job.get("text") or "").strip()
                         desc = _clean_html(str(job.get("descriptionPlain") or job.get("description") or ""))
-                        if len(title) < 3 or len(desc) < 25:
+                        job_url = str(job.get("hostedUrl") or "").strip()
+                        if not has_minimum_listing_info(title, board.name, job_url, desc):
                             continue
                         if not _matches_terms(title, desc, terms):
                             continue
@@ -414,7 +509,8 @@ def fetch_tier1_company_jobs(
                         expired, _ = is_opportunity_expired(None, posted_at)
                         if expired:
                             continue
-                        loc = str((job.get("categories") or {}).get("location") or "Remote")
+                        raw_loc = str((job.get("categories") or {}).get("location") or "").strip()
+                        loc = raw_loc or "Not available"
                         board_items.append(
                             RawFeedItemSchema(
                                 sourceName=f"{board.name} Careers (Lever)",
@@ -423,18 +519,20 @@ def fetch_tier1_company_jobs(
                                 organizationName=board.name,
                                 officialWebsite=board.website,
                                 location=loc,
-                                workMode=normalize_work_mode(str(job.get("workplaceType") or ""), loc),
+                                workMode=normalize_work_mode(
+                                    str(job.get("workplaceType") or ""), raw_loc, title
+                                ),
                                 opportunityType="internship"
                                 if "intern" in title.lower()
                                 else "graduate",
                                 roleCategory=_infer_role(title, board.default_role),
                                 domain=board.domain,
-                                compensationCurrency="USD",
+                                compensationCurrency=None,
                                 compensationPeriod="unknown",
-                                duration="Full-time / Programme",
+                                duration=extract_explicit_duration(f"{title} {desc}"),
                                 postedAt=posted_at,
                                 deadline=None,
-                                applicationUrl=str(job.get("hostedUrl") or board.website),
+                                applicationUrl=job_url,
                                 description=desc[:4000],
                                 httpReachable=True,
                             )
@@ -455,14 +553,29 @@ def fetch_tier1_company_jobs(
     return collected[:max_total], sources_queried, warnings
 
 
+def _infer_domain(title: str, desc: str) -> str:
+    blob = f"{title} {desc[:1000]}".lower()
+    if any(k in blob for k in ("machine learning", "ml ", "ai ", "pytorch", "llm", "rag")):
+        return "AI & Machine Learning"
+    if any(k in blob for k in ("data scien", "data engineer", "analytics", "pandas")):
+        return "Data Engineering"
+    if any(k in blob for k in ("security", "cyber", "appsec", "infosec")):
+        return "Cybersecurity"
+    if any(k in blob for k in ("distributed", "kubernetes", "kafka")):
+        return "Distributed Systems"
+    if any(k in blob for k in ("research", "scientific", "simulation")):
+        return "Scientific Computing"
+    return "Developer Tools & Cloud"
+
+
 def fetch_internshala_internships(
     http: httpx.Client,
     preferred_roles: list[str],
-    max_items: int = 20,
+    max_items: int = 12,
 ) -> tuple[list[RawFeedItemSchema], list[str], list[str]]:
     """
-    Fetches public category internship listings from Internshala for India-based internships.
-    Handles bot walls gracefully and returns extracted technical listings only.
+    Fetches public category internship listings from Internshala and verifies each candidate
+    detail page before admitting it. Never fabricates missing city, company, duration, or stipend.
     """
     slug_map = {
         "machine_learning": "machine-learning-internship",
@@ -482,10 +595,11 @@ def fetch_internshala_internships(
     items: list[RawFeedItemSchema] = []
     sources: list[str] = []
     warnings: list[str] = []
-    now_iso = utc_now_iso()
+    detail_checks = 0
+    max_detail_checks = min(max_items, 6)
 
     for cat_slug in categories:
-        if len(items) >= max_items:
+        if len(items) >= max_items or detail_checks >= max_detail_checks:
             break
         try:
             res = http.get(f"https://internshala.com/internships/{cat_slug}/")
@@ -493,7 +607,6 @@ def fetch_internshala_internships(
                 warnings.append(f"Internshala feed ({cat_slug}) returned HTTP {res.status_code}")
                 continue
             sources.append("Internshala Public Category Feed")
-            # Parse JSON-LD ItemList or card anchors when accessible
             links = re.findall(
                 r'<a[^>]+href="(/internship/detail/[^"]+)"[^>]*>(.*?)</a>',
                 res.text,
@@ -501,7 +614,7 @@ def fetch_internshala_internships(
             )
             seen_hrefs: set[str] = set()
             for idx, (rel_href, inner_html) in enumerate(links):
-                if len(items) >= max_items:
+                if len(items) >= max_items or detail_checks >= max_detail_checks:
                     break
                 if rel_href in seen_hrefs:
                     continue
@@ -511,33 +624,95 @@ def fetch_internshala_internships(
                     or raw_title.lower() in {"view details", "apply now", "know more"}
                     or not is_technical_career_role(raw_title)
                     or is_listing_text_closed(raw_title, inner_html)
-                    or re.search(r"\b(closed|expired|not accepting)\b", raw_title, re.I)
                 ):
                     continue
                 seen_hrefs.add(rel_href)
+                detail_checks += 1
+                detail_url = f"https://internshala.com{rel_href}"
+
+                try:
+                    detail_res = http.get(detail_url)
+                except Exception:
+                    continue
+                if (
+                    detail_res.status_code >= 400
+                    or "text/html" not in detail_res.headers.get("content-type", "text/html")
+                ):
+                    continue
+                final_url = str(getattr(detail_res, "url", "") or detail_url)
+                if "/internship/detail/" not in final_url:
+                    continue
+
+                detail_html = detail_res.text[:40000]
+                detail_clean = clean_html_to_text(detail_html)
+                if is_listing_text_closed(raw_title, detail_clean[:4000]):
+                    continue
+
+                # Extract genuine company name from DOM or slug (never invent placeholder)
+                org_dom = re.search(
+                    r'<div[^>]*class="[^"]*company_name[^"]*"[^>]*>(.*?)</div>',
+                    detail_html,
+                    flags=re.I | re.S,
+                )
                 slug_clean = rel_href.split("/detail/")[-1].rstrip("/")
                 org_match = re.search(r"-at-([a-z0-9\-]+?)\d*$", slug_clean, re.I)
                 org_name = (
-                    org_match.group(1).replace("-", " ").title()
-                    if org_match
-                    else "Indian Tech Company"
+                    clean_html_to_text(org_dom.group(1))
+                    if org_dom
+                    else (
+                        org_match.group(1).replace("-", " ").title()
+                        if org_match
+                        else ""
+                    )
                 )
-                is_wfh = (
-                    "work-from-home" in slug_clean.lower()
-                    or "remote" in slug_clean.lower()
-                    or "work from home" in raw_title.lower()
+                if not org_name:
+                    continue
+
+                desc_dom = re.search(
+                    r'<div[^>]*class="[^"]*internship_details[^"]*"[^>]*>(.*?)</div>\s*<div',
+                    detail_html,
+                    flags=re.I | re.S,
+                )
+                real_desc = clean_html_to_text(desc_dom.group(1)) if desc_dom else detail_clean[:3000]
+                if not has_minimum_listing_info(raw_title, org_name, detail_url, real_desc):
+                    continue
+
+                is_wfh = bool(
+                    re.search(
+                        r"\b(?:work\s+from\s+home|remote|wfh)\b",
+                        f"{raw_title} {slug_clean.replace('-', ' ')}",
+                        re.I,
+                    )
                 )
                 loc_match = re.search(r"-in-([a-z0-9\-]+?)-at-", slug_clean, re.I)
                 if is_wfh:
                     loc_name = "Remote (India)"
                     work_mode = "remote"
+                elif loc_match:
+                    loc_name = f"{loc_match.group(1).replace('-', ' ').title()}, India"
+                    work_mode = normalize_work_mode(None, loc_name, raw_title)
                 else:
-                    loc_name = (
-                        f"{loc_match.group(1).replace('-', ' ').title()}, India"
-                        if loc_match
-                        else "Bengaluru, India"
-                    )
-                    work_mode = normalize_work_mode("", f"{raw_title} {loc_name}")
+                    loc_name = "Not available"
+                    work_mode = normalize_work_mode(None, "", raw_title)
+
+                comp_min: int | None = None
+                comp_curr: str | None = None
+                comp_period = "unknown"
+                stipend_m = re.search(
+                    r"(?:₹|INR|Rs\.?)\s*([\d,]{3,7})\s*(?:/\s*month|per\s+month|/month)?",
+                    detail_clean[:3000],
+                    flags=re.I,
+                )
+                if stipend_m:
+                    try:
+                        comp_min = int(stipend_m.group(1).replace(",", ""))
+                        comp_curr = "INR"
+                        comp_period = "monthly"
+                    except ValueError:
+                        comp_min = None
+                elif re.search(r"\bstipend\b.{0,30}\bunpaid\b", detail_clean[:3000], flags=re.I):
+                    comp_period = "unpaid"
+
                 role_cat = _infer_role(raw_title, "software_engineering")
                 items.append(
                     RawFeedItemSchema(
@@ -549,17 +724,16 @@ def fetch_internshala_internships(
                         workMode=work_mode,
                         opportunityType="internship",
                         roleCategory=role_cat,
-                        domain="Developer Tools & Cloud",
-                        compensationCurrency="INR",
-                        compensationPeriod="monthly",
-                        duration="6 months",
-                        postedAt=now_iso,
+                        domain=_infer_domain(raw_title, real_desc),
+                        compensationMin=comp_min,
+                        compensationMax=comp_min,
+                        compensationCurrency=comp_curr,
+                        compensationPeriod=comp_period,
+                        duration=extract_explicit_duration(detail_clean[:3000]),
+                        postedAt=None,
                         deadline=None,
-                        applicationUrl=f"https://internshala.com{rel_href}",
-                        description=(
-                            f"{raw_title} at {org_name} in {loc_name}. "
-                            "Sourced from Internshala public internship listings; verify role details on the official application page."
-                        ),
+                        applicationUrl=detail_url,
+                        description=real_desc[:4000],
                         httpReachable=True,
                     )
                 )
@@ -569,314 +743,18 @@ def fetch_internshala_internships(
     return items[:max_items], sources, warnings
 
 
-_NATIVE_INDIA_COMPANIES: list[tuple[str, str, str, str, str, str, int, str]] = [
-    ("Razorpay", "https://razorpay.com", "https://razorpay.com/jobs/", "Bengaluru, India", "Fintech & Payments", "software_engineering", 65000, "Go, Python, Distributed Systems, PostgreSQL, Docker"),
-    ("Postman", "https://www.postman.com", "https://www.postman.com/company/careers/", "Bengaluru, India", "Developer Tools & Cloud", "software_engineering", 75000, "TypeScript, Node.js, React, Kubernetes, SQL"),
-    ("Juspay", "https://juspay.io", "https://juspay.io/careers", "Bengaluru, India", "Fintech & Payments", "systems_infrastructure", 60000, "Rust, Haskell, Go, Linux, Distributed Systems"),
-    ("Zerodha", "https://zerodha.com", "https://careers.zerodha.com", "Bengaluru, India", "Fintech & Payments", "software_engineering", 55000, "Go, Python, PostgreSQL, Redis, Linux"),
-    ("PhonePe", "https://www.phonepe.com", "https://www.phonepe.com/careers/", "Pune, India", "Fintech & Payments", "data_science", 70000, "Python, SQL, Spark, Machine Learning, PostgreSQL"),
-    ("CRED", "https://cred.club", "https://careers.cred.club", "Bengaluru, India", "Fintech & Payments", "software_engineering", 80000, "Java, Go, React, TypeScript, Kubernetes"),
-    ("Swiggy", "https://www.swiggy.com", "https://careers.swiggy.com", "Bengaluru, India", "Data Engineering", "machine_learning", 65000, "Python, PyTorch, SQL, Machine Learning, Docker"),
-    ("Meesho", "https://www.meesho.io", "https://www.meesho.io/careers", "Bengaluru, India", "Data Engineering", "data_science", 60000, "Python, Spark, SQL, TensorFlow, Kubernetes"),
-    ("Groww", "https://groww.in", "https://groww.in/careers", "Bengaluru, India", "Fintech & Payments", "software_engineering", 65000, "TypeScript, React, Java, PostgreSQL, Docker"),
-    ("BrowserStack", "https://www.browserstack.com", "https://www.browserstack.com/careers", "Mumbai, India", "Developer Tools & Cloud", "systems_infrastructure", 70000, "Ruby, Node.js, Docker, Kubernetes, Linux"),
-    ("Zeta", "https://www.zeta.tech", "https://careers.zeta.tech", "Hyderabad, India", "Fintech & Payments", "software_engineering", 65000, "Java, Go, Distributed Systems, PostgreSQL, AWS"),
-    ("Sprinklr", "https://www.sprinklr.com", "https://www.sprinklr.com/careers/", "Gurugram, India", "AI & Machine Learning", "machine_learning", 70000, "Python, PyTorch, React, Kubernetes, Machine Learning"),
-    ("Hasura", "https://hasura.io", "https://hasura.io/careers/", "Remote (India)", "Developer Tools & Cloud", "software_engineering", 65000, "TypeScript, Go, PostgreSQL, Docker, React"),
-    ("Sarvam AI", "https://www.sarvam.ai", "https://www.sarvam.ai/careers", "Bengaluru, India", "AI & Machine Learning", "machine_learning", 75000, "Python, PyTorch, Machine Learning, Distributed Systems, Linux"),
-    ("Chargebee", "https://www.chargebee.com", "https://www.chargebee.com/careers/", "Chennai, India", "Fintech & Payments", "software_engineering", 75000, "Go, Java, TypeScript, Distributed Systems, SQL"),
-    ("Dream11", "https://www.dreamsports.group", "https://www.dreamsports.group/careers/", "Mumbai, India", "Distributed Systems", "systems_infrastructure", 85000, "Go, Rust, Linux, Distributed Systems, Kubernetes"),
-    ("Atlassian India", "https://www.atlassian.com", "https://www.atlassian.com/company/careers/all-jobs?location=India", "Bengaluru, India", "Developer Tools & Cloud", "software_engineering", 100000, "TypeScript, React, Java, Python, Kubernetes"),
-    ("Google India", "https://about.google", "https://www.google.com/about/careers/applications/jobs/results/?location=India", "Hyderabad, India", "AI & Machine Learning", "software_engineering", 115000, "Python, C++, Go, Machine Learning, Distributed Systems"),
-    ("Microsoft India", "https://www.microsoft.com", "https://jobs.careers.microsoft.com/global/en/search?lc=India", "Hyderabad, India", "Developer Tools & Cloud", "software_engineering", 110000, "TypeScript, C++, Python, Cloud, Kubernetes"),
-    ("Adobe India", "https://www.adobe.com", "https://careers.adobe.com/us/en/search-results?location=India", "Noida, India", "AI & Machine Learning", "research", 100000, "Python, PyTorch, C++, Machine Learning, React"),
-    ("Nvidia India", "https://www.nvidia.com", "https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite", "Pune, India", "Scientific Computing", "systems_infrastructure", 95000, "C++, Python, Linux, PyTorch, CUDA"),
-    ("Darwinbox", "https://darwinbox.com", "https://darwinbox.com/careers", "Hyderabad, India", "Data Engineering", "data_science", 65000, "Python, SQL, Spark, Distributed Systems, Kubernetes"),
-    ("Rubrik India", "https://www.rubrik.com", "https://www.rubrik.com/company/careers", "Bengaluru, India", "Cybersecurity", "security", 100000, "Go, C++, Linux, Distributed Systems, Cybersecurity"),
-    ("Confluent India", "https://www.confluent.io", "https://www.confluent.io/careers/", "Bengaluru, India", "Distributed Systems", "systems_infrastructure", 95000, "Go, Java, Kubernetes, Distributed Systems, Linux"),
-    ("Flipkart", "https://www.flipkart.com", "https://www.flipkartcareers.com", "Bengaluru, India", "Data Engineering", "software_engineering", 75000, "Java, Python, SQL, Distributed Systems, Docker"),
-    ("Nutanix India", "https://www.nutanix.com", "https://www.nutanix.com/company/careers", "Pune, India", "Distributed Systems", "systems_infrastructure", 85000, "C++, Python, Linux, Kubernetes, Distributed Systems"),
-    ("Cisco India", "https://www.cisco.com", "https://jobs.cisco.com", "Chennai, India", "Cybersecurity", "security", 70000, "Python, C++, Linux, Cybersecurity, Docker"),
-    ("Freshworks", "https://www.freshworks.com", "https://www.freshworks.com/company/careers/", "Chennai, India", "Developer Tools & Cloud", "software_engineering", 60000, "Python, React, TypeScript, PostgreSQL, AWS"),
-    ("Zoho", "https://www.zoho.com", "https://www.zoho.com/careers/", "Chennai, India", "Developer Tools & Cloud", "software_engineering", 50000, "Java, Python, React, PostgreSQL, Linux"),
-    ("Druva", "https://www.druva.com", "https://www.druva.com/careers/", "Pune, India", "Cybersecurity", "security", 65000, "Go, Python, AWS, Cybersecurity, Kubernetes"),
-    ("Krutrim AI", "https://www.olakrutrim.com", "https://www.olakrutrim.com/careers", "Bengaluru, India", "AI & Machine Learning", "machine_learning", 70000, "Python, PyTorch, Machine Learning, FastAPI, Docker"),
-    ("InMobi", "https://www.inmobi.com", "https://www.inmobi.com/company/careers/", "Bengaluru, India", "Data Engineering", "data_science", 70000, "Python, SQL, Spark, Machine Learning, Kubernetes"),
-]
-
-_GLOBAL_WORLDWIDE_COMPANIES: list[tuple[str, str, str, str, str, str, int, str]] = [
-    ("Stripe", "https://stripe.com", "https://stripe.com/jobs/university", "San Francisco, United States", "Fintech & Payments", "software_engineering", 8200, "Go, Python, TypeScript, Distributed Systems, SQL"),
-    ("Cloudflare", "https://www.cloudflare.com", "https://www.cloudflare.com/careers/jobs/", "Austin, United States", "Developer Tools & Cloud", "systems_infrastructure", 7800, "Rust, Go, Linux, Distributed Systems, Docker"),
-    ("Anthropic", "https://www.anthropic.com", "https://www.anthropic.com/careers", "San Francisco, United States", "AI & Machine Learning", "machine_learning", 9000, "Python, PyTorch, Machine Learning, Distributed Systems, Rust"),
-    ("Vercel", "https://vercel.com", "https://vercel.com/careers", "Remote (Global)", "Developer Tools & Cloud", "software_engineering", 7500, "TypeScript, React, Next.js, Node.js, Rust"),
-    ("Linear", "https://linear.app", "https://linear.app/careers", "Remote (Global)", "Developer Tools & Cloud", "software_engineering", 7600, "TypeScript, React, PostgreSQL, Node.js, Git"),
-    ("Supabase", "https://supabase.com", "https://supabase.com/careers", "Remote (Global)", "Distributed Systems", "systems_infrastructure", 7000, "TypeScript, PostgreSQL, Go, Docker, Kubernetes"),
-    ("Databricks", "https://www.databricks.com", "https://www.databricks.com/company/careers", "Amsterdam, Netherlands", "Data Engineering", "data_science", 7800, "Python, SQL, Spark, Distributed Systems, Kubernetes"),
-    ("Grafana Labs", "https://grafana.com", "https://grafana.com/about/careers/", "Remote (Global)", "Distributed Systems", "systems_infrastructure", 7200, "Go, TypeScript, React, Kubernetes, Linux"),
-    ("Snyk", "https://snyk.io", "https://snyk.io/careers/", "London, United Kingdom", "Cybersecurity", "security", 6800, "TypeScript, Go, Docker, Kubernetes, Cybersecurity"),
-    ("Wiz", "https://www.wiz.io", "https://www.wiz.io/careers", "New York, United States", "Cybersecurity", "security", 7900, "Go, Python, Kubernetes, AWS, Cybersecurity"),
-    ("Datadog", "https://www.datadoghq.com", "https://careers.datadoghq.com", "Paris, France", "Developer Tools & Cloud", "systems_infrastructure", 7500, "Go, Python, Rust, Kubernetes, Distributed Systems"),
-    ("Scale AI", "https://scale.com", "https://scale.com/careers", "San Francisco, United States", "AI & Machine Learning", "machine_learning", 8500, "Python, PyTorch, TypeScript, React, Machine Learning"),
-    ("Figma", "https://www.figma.com", "https://www.figma.com/careers/", "San Francisco, United States", "Scientific Computing", "software_engineering", 8400, "TypeScript, C++, Rust, React, Git"),
-    ("Google DeepMind", "https://deepmind.google", "https://deepmind.google/about/careers/", "London, United Kingdom", "Scientific Computing", "research", 8200, "Python, PyTorch, TensorFlow, Machine Learning, C++"),
-    ("GitLab", "https://about.gitlab.com", "https://about.gitlab.com/jobs/", "Remote (Global)", "Open Source Ecosystem", "software_engineering", 6800, "Go, Ruby, TypeScript, Docker, Kubernetes"),
-    ("Mozilla", "https://www.mozilla.org", "https://www.mozilla.org/en-US/careers/", "Toronto, Canada", "Open Source Ecosystem", "software_engineering", 7000, "Rust, C++, Python, TypeScript, Linux"),
-    ("dbt Labs", "https://www.getdbt.com", "https://www.getdbt.com/dbt-labs/careers/", "Remote (Global)", "Data Engineering", "data_science", 6900, "Python, SQL, PostgreSQL, Docker, Git"),
-    ("Ramp", "https://ramp.com", "https://ramp.com/careers", "New York, United States", "Fintech & Payments", "software_engineering", 8000, "Python, TypeScript, React, FastAPI, PostgreSQL"),
-    ("Linux Foundation LFX", "https://mentorship.lfx.linuxfoundation.org", "https://mentorship.lfx.linuxfoundation.org", "Remote (Global)", "Open Source Ecosystem", "systems_infrastructure", 3000, "Go, Rust, Kubernetes, Linux, Docker"),
-    ("MLH Fellowship", "https://fellowship.mlh.io", "https://fellowship.mlh.io", "Remote (Global)", "Open Source Ecosystem", "software_engineering", 2500, "Python, TypeScript, React, Git, Docker"),
-    ("CERN Openlab", "https://openlab.cern", "https://careers.cern/students", "Geneva, Switzerland", "Scientific Computing", "research", 3800, "Python, C++, Linux, Machine Learning, Distributed Systems"),
-    ("Outreachy", "https://www.outreachy.org", "https://www.outreachy.org/apply/", "Remote (Global)", "Open Source Ecosystem", "software_engineering", 3500, "Python, Rust, TypeScript, Git, Linux"),
-    ("Shopify", "https://www.shopify.com", "https://www.shopify.com/careers", "Toronto, Canada", "Developer Tools & Cloud", "software_engineering", 7200, "TypeScript, React, Go, Docker, SQL"),
-    ("Canonical", "https://canonical.com", "https://canonical.com/careers", "London, United Kingdom", "Open Source Ecosystem", "systems_infrastructure", 6200, "Python, Go, Rust, Linux, Kubernetes"),
-]
-
-
-def _role_title_for_track(role_cat: str, preferred_domains: list[str], preferred_roles: list[str]) -> str:
-    if role_cat == "machine_learning" or "machine_learning" in preferred_roles:
-        return "Machine Learning & AI Engineering Intern"
-    if role_cat == "data_science":
-        return "Data Science & Analytics Engineering Intern"
-    if role_cat == "security":
-        return "Security Engineering Intern"
-    if role_cat == "systems_infrastructure":
-        return "Systems & Cloud Infrastructure Intern"
-    if role_cat == "research":
-        return "Applied Research Engineering Intern"
-    dom_tag = preferred_domains[0].split("&")[0].strip() if preferred_domains else "Software"
-    return f"Software Engineering Intern ({dom_tag})"
-
-
-def _merge_stack_with_skills(base_stack: str, preferred_skills: list[str] | None) -> str:
-    if not preferred_skills:
-        return base_stack
-    base_parts = [s.strip() for s in base_stack.split(",") if s.strip()]
-    seen = {p.lower() for p in base_parts}
-    extra = [s.strip() for s in preferred_skills[:4] if s.strip() and s.strip().lower() not in seen]
-    return ", ".join([*extra, *base_parts]) if extra else base_stack
-
-
-def build_verified_native_internships(
-    native_country: str,
-    preferred_domains: list[str],
-    preferred_roles: list[str],
-    preferred_locations: list[str] | None = None,
-    work_modes: list[str] | None = None,
-    preferred_skills: list[str] | None = None,
-    target_count: int = 32,
-) -> list[RawFeedItemSchema]:
+def build_verified_native_internships(*_args: Any, **_kwargs: Any) -> list[RawFeedItemSchema]:
     """
-    Provides domain-ranked Tier-1 verified internships in the user's native country
-    so each profile fetch always guarantees >= 30 native-country internships stored in the shared DB,
-    with >= 80% (>= 75% mandatory) compliant with the user's location, work-mode, role, and domain preferences.
+    Synthetic native-country top-ups are permanently disabled (Option A: show only
+    100% real, verified-open listings).
     """
-    now_iso = utc_now_iso()
-    pref_domains_lower = {d.lower() for d in preferred_domains}
-    pref_roles_lower = {r.lower() for r in preferred_roles}
-    country_clean = (native_country or "India").strip() or "India"
-    is_india = country_clean.lower() == "india"
-
-    country_cities = {
-        "united states": ["San Francisco, United States", "New York, United States", "Seattle, United States", "Austin, United States", "Remote (United States)"],
-        "united kingdom": ["London, United Kingdom", "Cambridge, United Kingdom", "Manchester, United Kingdom", "Remote (United Kingdom)"],
-        "canada": ["Toronto, Canada", "Vancouver, Canada", "Waterloo, Canada", "Remote (Canada)"],
-        "germany": ["Berlin, Germany", "Munich, Germany", "Hamburg, Germany", "Remote (Germany)"],
-        "singapore": ["Singapore", "Remote (Singapore)"],
-        "australia": ["Sydney, Australia", "Melbourne, Australia", "Remote (Australia)"],
-    }.get(country_clean.lower(), [f"{country_clean} (Hybrid)", f"Remote ({country_clean})"])
-
-    pref_locs = [p.strip() for p in (preferred_locations or []) if p.strip()]
-    pref_modes = [m.strip().lower() for m in (work_modes or []) if m.strip()]
-    compliant_pairs: list[tuple[str, str]] = []
-    if any("remote" in p.lower() for p in pref_locs):
-        compliant_pairs.append((f"Remote ({country_clean})", "remote"))
-    for place in pref_locs:
-        if "remote" in place.lower():
-            continue
-        place_full = (
-            place
-            if country_clean.lower() in place.lower()
-            else f"{place}, {country_clean}"
-        )
-        if pref_modes == ["remote"]:
-            compliant_pairs.append((f"Remote ({place_full})", "remote"))
-        else:
-            non_remote_modes = [m for m in pref_modes if m != "remote"]
-            mode = non_remote_modes[0] if non_remote_modes else "hybrid"
-            compliant_pairs.append((place_full, mode))
-
-    if not compliant_pairs:
-        if "remote" in pref_modes:
-            compliant_pairs = [(f"Remote ({country_clean})", "remote")]
-        else:
-            default_mode = pref_modes[0] if pref_modes else "hybrid"
-            fallback_city = "Bengaluru, India" if is_india else country_cities[0]
-            compliant_pairs = [(fallback_city, default_mode)]
-
-    compliant_quota = math.ceil(target_count * 0.85)
-
-    primary_pool = sorted(
-        _NATIVE_INDIA_COMPANIES[:30],
-        key=lambda row: (
-            0 if row[4].lower() in pref_domains_lower else 1,
-            0 if row[5].lower() in pref_roles_lower else 1,
-        ),
-    )
-    ranked = [*primary_pool, *_NATIVE_INDIA_COMPANIES[30:]]
-
-    items: list[RawFeedItemSchema] = []
-    for idx, (org, site, jobs_url, loc, domain, role_cat, stipend, stack) in enumerate(ranked):
-        if len(items) >= target_count:
-            break
-        is_compliant_slot = idx < compliant_quota
-        if is_compliant_slot:
-            effective_loc, effective_work_mode = compliant_pairs[idx % len(compliant_pairs)]
-            effective_role = (
-                preferred_roles[idx % len(preferred_roles)] if preferred_roles else role_cat
-            )
-            effective_domain = (
-                preferred_domains[idx % len(preferred_domains)] if preferred_domains else domain
-            )
-            effective_stack = _merge_stack_with_skills(stack, preferred_skills)
-        else:
-            effective_loc = loc if is_india else country_cities[idx % len(country_cities)]
-            effective_work_mode = "remote" if "remote" in effective_loc.lower() else "hybrid"
-            effective_role = role_cat
-            effective_domain = domain
-            effective_stack = stack
-
-        currency = "INR" if is_india else "USD"
-        effective_stipend = stipend if is_india else round(stipend / 15)
-        role_title = _role_title_for_track(effective_role, [effective_domain], [effective_role])
-        if idx % 2 == 0 and effective_role == "software_engineering":
-            role_title = "Software Engineering Intern — Backend & Platform"
-        elif idx % 3 == 0 and effective_role == "software_engineering":
-            role_title = "Full-Stack Product Engineering Intern"
-
-        items.append(
-            RawFeedItemSchema(
-                sourceName=f"{org} Official Careers",
-                externalId=f"native_{country_clean.lower().replace(' ', '_')}_{org.lower().replace(' ', '_')}",
-                title=role_title,
-                organizationName=org,
-                officialWebsite=site,
-                location=effective_loc,
-                workMode=effective_work_mode,
-                opportunityType="internship",
-                roleCategory=effective_role,
-                domain=effective_domain,
-                compensationMin=effective_stipend,
-                compensationMax=round(effective_stipend * 1.15),
-                compensationCurrency=currency,
-                compensationPeriod="monthly",
-                duration="6 months",
-                postedAt=now_iso,
-                deadline=None,
-                applicationUrl=jobs_url,
-                description=(
-                    f"{role_title} with {org}'s {effective_domain} engineering team in {effective_loc}. "
-                    f"Core stack includes {effective_stack}. You will ship production pull requests with code reviews, "
-                    "automated tests, and dedicated engineering mentorship."
-                ),
-                httpReachable=True,
-            )
-        )
-    return items
+    return []
 
 
-def build_verified_worldwide_internships(
-    preferred_domains: list[str],
-    preferred_roles: list[str],
-    preferred_locations: list[str] | None = None,
-    work_modes: list[str] | None = None,
-    preferred_skills: list[str] | None = None,
-    target_count: int = 22,
-) -> list[RawFeedItemSchema]:
+def build_verified_worldwide_internships(*_args: Any, **_kwargs: Any) -> list[RawFeedItemSchema]:
     """
-    Provides domain-ranked Tier-1 worldwide internships and global open-source/research fellowships
-    so each profile fetch always guarantees >= 20 worldwide internships alongside native roles,
-    with >= 80% (>= 75% mandatory) aligned with the user's preferences.
+    Synthetic worldwide top-ups are permanently disabled (Option A: show only
+    100% real, verified-open listings).
     """
-    now_iso = utc_now_iso()
-    pref_domains_lower = {d.lower() for d in preferred_domains}
-    pref_roles_lower = {r.lower() for r in preferred_roles}
-    pref_locs = [p.strip() for p in (preferred_locations or []) if p.strip()]
-    pref_modes = [m.strip().lower() for m in (work_modes or []) if m.strip()]
-    prefers_remote = any("remote" in p.lower() for p in pref_locs) or "remote" in pref_modes
-    compliant_quota = math.ceil(target_count * 0.85)
-
-    primary_pool = sorted(
-        _GLOBAL_WORLDWIDE_COMPANIES[:20],
-        key=lambda row: (
-            0 if row[4].lower() in pref_domains_lower else 1,
-            0 if row[5].lower() in pref_roles_lower else 1,
-        ),
-    )
-    ranked = [*primary_pool, *_GLOBAL_WORLDWIDE_COMPANIES[20:]]
-
-    items: list[RawFeedItemSchema] = []
-    for idx, (org, site, jobs_url, loc, domain, role_cat, stipend_usd, stack) in enumerate(ranked):
-        if len(items) >= target_count:
-            break
-        is_compliant_slot = idx < compliant_quota
-        if is_compliant_slot:
-            effective_loc = "Remote (Global)" if prefers_remote else loc
-            effective_work_mode = (
-                "remote"
-                if prefers_remote
-                else (pref_modes[idx % len(pref_modes)] if pref_modes else "hybrid")
-            )
-            effective_role = (
-                preferred_roles[idx % len(preferred_roles)] if preferred_roles else role_cat
-            )
-            effective_domain = (
-                preferred_domains[idx % len(preferred_domains)] if preferred_domains else domain
-            )
-            effective_stack = _merge_stack_with_skills(stack, preferred_skills)
-        else:
-            effective_loc = loc
-            effective_work_mode = "remote" if "remote" in loc.lower() else "hybrid"
-            effective_role = role_cat
-            effective_domain = domain
-            effective_stack = stack
-
-        opp_type = (
-            "open_source"
-            if effective_domain == "Open Source Ecosystem"
-            and ("Foundation" in org or "Fellowship" in org or "Outreachy" in org)
-            else ("research" if effective_role == "research" else "internship")
-        )
-        title = (
-            f"{effective_domain.split('&')[0].strip()} Open-Source Fellowship ({org})"
-            if opp_type == "open_source"
-            else _role_title_for_track(effective_role, [effective_domain], [effective_role])
-        )
-        items.append(
-            RawFeedItemSchema(
-                sourceName=f"{org} Official Careers",
-                externalId=f"worldwide_{org.lower().replace(' ', '_')}",
-                title=title,
-                organizationName=org,
-                officialWebsite=site,
-                location=effective_loc,
-                workMode=effective_work_mode,
-                opportunityType=opp_type,
-                roleCategory=effective_role,
-                domain=effective_domain,
-                compensationMin=stipend_usd,
-                compensationMax=round(stipend_usd * 1.15),
-                compensationCurrency="USD",
-                compensationPeriod="monthly",
-                duration="3 to 6 months",
-                postedAt=now_iso,
-                deadline=None,
-                applicationUrl=jobs_url,
-                description=(
-                    f"{title} at {org} ({effective_loc}). Work with core engineering and research teams using {effective_stack}. "
-                    "Verified official career portal listing with structured mentorship and technical project ownership."
-                ),
-                httpReachable=True,
-            )
-        )
-    return items
+    return []
 

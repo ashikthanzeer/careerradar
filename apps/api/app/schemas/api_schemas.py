@@ -244,15 +244,15 @@ class CreateOpportunityInputSchema(BaseModel):
     opportunityType: OpportunityType = "internship"
     roleCategory: RoleCategory = "software_engineering"
     domain: str = "Developer Tools & Cloud"
-    location: str = Field(min_length=2, max_length=160)
-    workMode: WorkMode = "remote"
+    location: str = Field(default="Not available", min_length=2, max_length=160)
+    workMode: WorkMode = "unknown"
     compensationMin: int | None = None
     compensationMax: int | None = None
-    compensationCurrency: Literal["INR", "USD", "EUR"] | None = "INR"
+    compensationCurrency: Literal["INR", "USD", "EUR"] | None = None
     compensationPeriod: Literal[
         "monthly", "total_stipend", "hourly", "unpaid", "unknown"
-    ] = "monthly"
-    duration: str = Field(min_length=2, max_length=64)
+    ] = "unknown"
+    duration: str = Field(default="Not available", min_length=2, max_length=64)
     deadline: str | None = None
     applicationUrl: str = Field(min_length=8, max_length=1000)
     sourceName: str = Field(min_length=2, max_length=120)

@@ -9,7 +9,7 @@ import { appRoutes } from '@/app/router';
 import { opportunitiesService } from '@/services/opportunities.service';
 import { applicationsService } from '@/services/applications.service';
 import { localStore } from '@/lib/storage';
-import { formatCleanText, formatLocationWithMode } from '@/lib/utils';
+import { formatCleanText, formatCompensation, formatLocationWithMode } from '@/lib/utils';
 import { API_CONFIG } from '@/services/api-client';
 
 function renderWithRouter(initialEntry = '/') {
@@ -280,6 +280,12 @@ describe('Production Audit: Zero Dummy Data, OAuth Login, Scam Protection & UI J
         'Backend Software Engineer Intern'
       );
       expect(screen.getByLabelText(/Company Name/i)).toHaveValue('Stripe');
+      const modalWorkMode = screen
+        .getAllByLabelText(/Work Mode/i)
+        .find((el) => el.getAttribute('name') === 'workMode');
+      expect(modalWorkMode).toHaveValue('unknown');
+      expect(screen.getByLabelText(/City \/ Location/i)).toHaveValue('Not available');
+      expect(screen.getByLabelText(/Duration/i)).toHaveValue('Not available');
     });
   });
 
@@ -336,6 +342,12 @@ describe('Production Audit: Zero Dummy Data, OAuth Login, Scam Protection & UI J
     expect(formatLocationWithMode('Bengaluru, India', 'hybrid')).toBe(
       'Bengaluru, India (Hybrid)'
     );
+    expect(formatLocationWithMode('Not available', 'unknown')).toBe('Not available');
+    expect(formatLocationWithMode('Bengaluru, India', 'unknown')).toBe(
+      'Bengaluru, India'
+    );
+    expect(formatLocationWithMode('Not available', 'remote')).toBe('Remote');
+    expect(formatCompensation(null, null, null, 'unknown')).toBe('Not available');
   });
 
   it('TC-08: saves fetched jobs locally and filters/paginates without re-fetching on preference or page change', async () => {

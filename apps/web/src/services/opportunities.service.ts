@@ -19,11 +19,51 @@ import type {
 } from '@/types/domain';
 
 const CLOSED_LISTING_REGEX =
-  /\b(?:no longer accepting applications|job is no longer available|position has been filled|this position is closed|internship is closed|applications are closed|posting has been removed|404 not found|page not found|no longer open|listing has expired|role has been filled)\b/i;
+  /\b(?:no longer accepting(?: applications)?|job is no longer available|position has been filled|this position is closed|this internship is closed|internship is closed|internship has expired|applications are closed|application window has closed|posting has been removed|404 not found|page not found|no longer open|listing has expired|this job has expired|role has been filled|job is closed|requisition is closed|position is closed|role is closed)\b/i;
 
-function isMockListingExpired(opp: Pick<Opportunity, 'status' | 'deadline' | 'postedAt' | 'firstSeenAt' | 'title' | 'description'>): boolean {
+const GENERIC_CAREER_PATH_REGEX =
+  /^\/(?:(?:[a-z]{2}(?:-[a-z]{2})?\/)*(?:careers|jobs|internships|about(?:\/careers)?|company\/careers(?:\/all-jobs)?|dbt-labs\/careers|join-us|open-positions|work-with-us|apply|students|university|jobs\/university|careers\/jobs|careers\/results|jobs\/results|search-results|global\/[a-z]{2}\/search))\/?$/i;
+
+let localOpportunitySeq = 0;
+
+function isSpecificJobPostingUrl(rawUrl?: string | null): boolean {
+  if (!rawUrl || !rawUrl.trim()) return false;
+  try {
+    const parsed = new URL(rawUrl.trim());
+    if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname) return false;
+    const queryLower = parsed.search.toLowerCase();
+    if (
+      ['gh_jid=', 'jk=', 'jobid=', 'job_id=', 'reqid=', 'id=', 'jid=', 'posting_id='].some(
+        (key) => queryLower.includes(key)
+      )
+    ) {
+      return true;
+    }
+    if (!parsed.pathname || parsed.pathname === '/') return false;
+    return !GENERIC_CAREER_PATH_REGEX.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function isMockListingExpired(
+  opp: Pick<
+    Opportunity,
+    'status' | 'deadline' | 'postedAt' | 'firstSeenAt' | 'title' | 'description' | 'applicationUrl'
+  > & { sources?: OpportunitySource[] }
+): boolean {
   const nowMs = Date.now();
   if (opp.status === 'expired') return true;
+  if (!isSpecificJobPostingUrl(opp.applicationUrl)) return true;
+  if (
+    opp.sources?.some(
+      (src) =>
+        /^(native_|worldwide_)/i.test(src.externalId || '') ||
+        /(?:official careers|official career portal)$/i.test(src.sourceName || '')
+    )
+  ) {
+    return true;
+  }
   if (CLOSED_LISTING_REGEX.test(`${opp.title || ''} ${opp.description || ''}`)) {
     return true;
   }
@@ -51,8 +91,15 @@ function isOpportunityCompliantForProfile(
   const prefRoles = new Set(profile.preferredRoles.map((r) => r.trim().toLowerCase()));
   const prefDomains = new Set(profile.preferredDomains.map((d) => d.trim().toLowerCase()));
 
-  const itemLoc = (item.location || '').toLowerCase();
-  const itemMode = (item.workMode || '').toLowerCase();
+  const itemLoc = (item.location || '').trim().toLowerCase();
+  const itemMode = (item.workMode || '').trim().toLowerCase();
+  const roleOk = prefRoles.size === 0 || prefRoles.has((item.roleCategory || '').toLowerCase());
+  const domainOk = prefDomains.size === 0 || prefDomains.has((item.domain || '').toLowerCase());
+
+  const locMissing = ['not available', 'unknown', ''].includes(itemLoc);
+  if (locMissing && itemMode === 'unknown') {
+    return roleOk || domainOk;
+  }
 
   let locOk = true;
   if (prefLocs.length > 0) {
@@ -65,16 +112,14 @@ function isOpportunityCompliantForProfile(
     if (matchesRemote) {
       locOk = true;
     } else if (matchesCity) {
-      locOk = prefModes.length === 0 || prefModes.includes(itemMode);
+      locOk = prefModes.length === 0 || itemMode === 'unknown' || prefModes.includes(itemMode);
     } else {
       locOk = false;
     }
   } else if (prefModes.length > 0) {
-    locOk = prefModes.includes(itemMode);
+    locOk = itemMode === 'unknown' || prefModes.includes(itemMode);
   }
 
-  const roleOk = prefRoles.size === 0 || prefRoles.has((item.roleCategory || '').toLowerCase());
-  const domainOk = prefDomains.size === 0 || prefDomains.has((item.domain || '').toLowerCase());
   return locOk && (roleOk || domainOk);
 }
 
@@ -392,6 +437,34 @@ export const opportunitiesService = {
     return buildEnrichedOpportunity(found);
   },
 
+  async verifyOpportunityLive(opportunityId: string): Promise<{
+    opportunityId: string;
+    available: boolean;
+    status: string;
+    reason: string;
+  }> {
+    if (API_CONFIG.dataMode !== 'mock') {
+      const res = await apiRequest<{
+        opportunityId: string;
+        available: boolean;
+        status: string;
+        reason: string;
+      }>(`/opportunities/${opportunityId}/verify-live`, {
+        method: 'POST',
+      });
+      if (!res.available) {
+        localStore.removeCachedOpportunity(opportunityId);
+      }
+      return res;
+    }
+    return {
+      opportunityId,
+      available: true,
+      status: 'open',
+      reason: 'Offline workspace check passed.',
+    };
+  },
+
   async createAndEvaluateOpportunity(
     input: CreateOpportunityInput
   ): Promise<EnrichedOpportunity> {
@@ -413,7 +486,8 @@ export const opportunitiesService = {
     }
 
     const now = new Date().toISOString();
-    const idSuffix = Date.now().toString(36);
+    localOpportunitySeq += 1;
+    const idSuffix = `${Date.now().toString(36)}_${localOpportunitySeq.toString(36)}`;
     const orgId = `org_custom_${idSuffix}`;
     const oppId = `opp_custom_${idSuffix}`;
 
@@ -449,7 +523,7 @@ export const opportunitiesService = {
       workMode: input.workMode,
       compensationMin: input.compensationMin ?? null,
       compensationMax: input.compensationMax ?? input.compensationMin ?? null,
-      compensationCurrency: input.compensationCurrency ?? 'INR',
+      compensationCurrency: input.compensationCurrency ?? null,
       compensationPeriod: input.compensationPeriod,
       duration: input.duration.trim(),
       postedAt: now,
@@ -506,7 +580,7 @@ export const opportunitiesService = {
     location: string;
     workMode: Opportunity['workMode'];
     compensationMin: number | null;
-    compensationCurrency: 'INR' | 'USD' | 'EUR';
+    compensationCurrency: 'INR' | 'USD' | 'EUR' | null;
     compensationPeriod: Opportunity['compensationPeriod'];
     duration: string;
     deadline: string | null;
@@ -556,7 +630,7 @@ export const opportunitiesService = {
 
     let title = '';
     let organizationName = '';
-    let location = 'Remote';
+    let location = 'Not available';
 
     if (sourceName === 'LinkedIn' && path.includes('jobs/view/')) {
       const slug = path.split('jobs/view/').pop()?.replace(/-\d+$/, '') ?? '';
@@ -589,11 +663,11 @@ export const opportunitiesService = {
       roleCategory: 'software_engineering',
       domain: 'Developer Tools & Cloud',
       location,
-      workMode: location.toLowerCase().includes('remote') ? 'remote' : 'hybrid',
+      workMode: location.toLowerCase().includes('remote') ? 'remote' : 'unknown',
       compensationMin: null,
-      compensationCurrency: 'INR',
-      compensationPeriod: 'monthly',
-      duration: '6 months',
+      compensationCurrency: null,
+      compensationPeriod: 'unknown',
+      duration: 'Not available',
       deadline: null,
       applicationUrl: url.trim(),
       sourceName,
@@ -649,12 +723,12 @@ export const opportunitiesService = {
       triggerSource,
       query: query || 'software',
       nativeCountry,
-      nativeCount: 30,
-      worldwideCount: 20,
+      nativeCount: 0,
+      worldwideCount: 0,
       sourcesQueried: [
-        'Tier-1 India Career Portals',
-        'Tier-1 Worldwide Career Portals',
-        'Internshala Public Category Feed',
+        'Greenhouse ATS Company Boards',
+        'Ashby ATS Company Boards',
+        'Internshala Verified Category Listings',
         'Arbeitnow Public API',
         'The Muse Public API',
         'Remotive Public API',
