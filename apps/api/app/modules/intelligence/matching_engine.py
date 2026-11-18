@@ -1,4 +1,4 @@
-from app.models.entities import Opportunity
+from app.models.entities import Opportunity, Organization
 from app.schemas.api_schemas import (
     CareerProfileSchema,
     FactorBreakdownSchema,
@@ -52,7 +52,7 @@ def analyze_skill_gap(
 
     for s in profile.skills:
         key = s.canonicalName.strip().lower()
-        if s.sourceType == "explicit":
+        if s.sourceType != "inferred_from_project":
             explicit_map[key] = s.canonicalName
         else:
             inferred_map[key] = s.sourceReference or "Profile project"
@@ -114,11 +114,11 @@ def analyze_skill_gap(
     req_items = [i for i in items if i.requirementType == "required"]
     matched_req_count = sum(1 for i in req_items if i.status != "unverified_gap")
     req_coverage = (
-        round((matched_req_count / len(req_items)) * 100) if req_items else 100
+        round((matched_req_count / len(req_items)) * 100) if req_items else 0
     )
 
     total_matched = sum(1 for i in items if i.status != "unverified_gap")
-    overall_coverage = round((total_matched / len(items)) * 100) if items else 100
+    overall_coverage = round((total_matched / len(items)) * 100) if items else 0
 
     return SkillGapAnalysisSchema(
         opportunityId=opportunity.id,
@@ -138,6 +138,7 @@ def compute_recommendation_match(
     analysis: OpportunityAnalysisSchema,
     skill_gap: SkillGapAnalysisSchema,
     profile: CareerProfileSchema,
+    organization: Organization | None = None,
 ) -> RecommendationMatchSchema:
     """
     Explainable Weighted Recommendation Scorer (PRD §6.4).
@@ -208,6 +209,16 @@ def compute_recommendation_match(
             f"Required skills not yet listed on your profile: {', '.join(skill_gap.missingRequiredSkills)}."
         )
 
+    ver_meta = (organization.verification_metadata or {}) if organization else {}
+    is_tier1_verified = bool(
+        ver_meta.get("knownEntity") and ver_meta.get("domainVerified")
+    )
+    if is_tier1_verified and domain_aligned:
+        why_recommended.append(
+            f"Tier-1 verified employer ({organization.name}) in {opportunity.domain}."
+        )
+        contributing.append(f"Tier-1 domain preference: {organization.name}")
+
     composite = round(
         req_skill_score * 0.40
         + role_score * 0.20
@@ -215,6 +226,8 @@ def compute_recommendation_match(
         + pref_skill_score * 0.15
         + logistics_score * 0.10
     )
+    if is_tier1_verified:
+        composite = min(100, composite + (5 if domain_aligned else 2))
 
     if composite >= 80:
         tier = "strong_alignment"

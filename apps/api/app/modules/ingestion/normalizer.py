@@ -120,3 +120,92 @@ def jaccard_similarity(text_a: str, text_b: str) -> float:
     union = len(tokens_a | tokens_b)
     return intersection / union if union > 0 else 0.0
 
+
+NON_TECHNICAL_TITLE_PATTERN = re.compile(
+    r"\b(?:market\s+access|sales|account\s+executive|business\s+development|"
+    r"recruiter|talent\s+acquisition|human\s+resources|hr\s+manager|legal|"
+    r"counsel|finance\s+manager|marketing\s+manager|customer\s+success|"
+    r"payroll|nurse|physician|medical\s+science|clinical\s+trial|real\s+estate)\b",
+    re.IGNORECASE,
+)
+
+TECHNICAL_ROLE_PATTERN = re.compile(
+    r"\b(?:software|engineer|developer|programmer|data|machine\s+learning|ml|ai|"
+    r"security|cyber|appsec|infosec|systems|cloud|devops|sre|frontend|backend|"
+    r"full\s*stack|fullstack|mobile|ios|android|platform|research|intern|internship|"
+    r"fellowship|python|typescript|react|rust|golang|kubernetes|distributed|quant)\b",
+    re.IGNORECASE,
+)
+
+
+def is_technical_career_role(title: str, tags: list[str] | None = None) -> bool:
+    """
+    Filters out non-technical commercial/clinical/HR postings when ingesting from
+    broad job boards while preserving engineering, data, ML, security, and research roles.
+    """
+    clean_title = (title or "").strip()
+    if not clean_title:
+        return False
+    has_tech_title = bool(TECHNICAL_ROLE_PATTERN.search(clean_title))
+    if NON_TECHNICAL_TITLE_PATTERN.search(clean_title) and not has_tech_title:
+        return False
+    if has_tech_title:
+        return True
+    tags_blob = " ".join(str(t) for t in (tags or []))
+    return bool(TECHNICAL_ROLE_PATTERN.search(tags_blob))
+
+
+COUNTRY_HUB_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "india": (
+        "india",
+        "bengaluru",
+        "bangalore",
+        "hyderabad",
+        "pune",
+        "mumbai",
+        "gurugram",
+        "gurgaon",
+        "noida",
+        "delhi",
+        "chennai",
+        "kolkata",
+        "kochi",
+        "ahmedabad",
+        "jaipur",
+        "indore",
+        "coimbatore",
+        "trivandrum",
+        "thiruvananthapuram",
+        "kerala",
+        "karnataka",
+        "maharashtra",
+        "tamil nadu",
+        "telangana",
+    ),
+    "united states": ("united states", "usa", "u.s.", "san francisco", "new york", "seattle", "austin", "boston", "california", "bay area"),
+    "united kingdom": ("united kingdom", "uk", "london", "manchester", "cambridge", "edinburgh"),
+    "canada": ("canada", "toronto", "vancouver", "montreal", "waterloo", "ottawa"),
+    "germany": ("germany", "berlin", "munich", "hamburg", "frankfurt", "deutschland"),
+    "singapore": ("singapore",),
+    "australia": ("australia", "sydney", "melbourne", "brisbane"),
+    "netherlands": ("netherlands", "amsterdam", "rotterdam", "utrecht"),
+    "france": ("france", "paris", "lyon"),
+    "japan": ("japan", "tokyo", "osaka"),
+}
+
+
+def is_native_country_location(location: str, native_country: str = "India") -> bool:
+    """
+    Determines whether a job's location matches the user's native country (default: India).
+    """
+    loc = (location or "").strip().lower()
+    if not loc:
+        return False
+    country_key = (native_country or "India").strip().lower()
+    keywords = COUNTRY_HUB_KEYWORDS.get(country_key, (country_key,))
+    if any(re.search(rf"\b{re.escape(k)}\b", loc) for k in keywords):
+        return True
+    if country_key == "india" and re.search(r",\s*in\b", loc):
+        return True
+    return False
+

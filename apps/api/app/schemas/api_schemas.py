@@ -267,7 +267,9 @@ class UserSkillSchema(BaseModel):
     ] = "language"
     proficiency: Literal["beginner", "intermediate", "advanced"] = "intermediate"
     yearsExperience: float = 1.0
-    sourceType: Literal["explicit", "inferred_from_project"] = "explicit"
+    sourceType: Literal[
+        "explicit", "inferred_from_project", "resume", "linkedin", "portfolio", "github"
+    ] = "explicit"
     sourceReference: str | None = None
 
 
@@ -296,6 +298,15 @@ class CareerProfileSchema(BaseModel):
     projects: list[ProfileProjectSchema]
     skills: list[UserSkillSchema]
     updatedAt: str
+    onboardingCompleted: bool = False
+    nativeCountry: str = "India"
+    portfolioUrl: str | None = None
+    linkedinUrl: str | None = None
+    lastJobFetchAt: str | None = None
+    triggersUsedToday: int = 0
+    triggersRemainingToday: int = 2
+    maxTriggersPerDay: int = 2
+    isStaleForLoginTrigger: bool = False
 
 
 class CreateApplicationInputSchema(BaseModel):

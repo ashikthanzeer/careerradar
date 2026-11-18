@@ -20,9 +20,10 @@ import {
   APPLICATION_STATUS_META,
   OPPORTUNITY_TYPE_LABELS,
   ROLE_CATEGORY_LABELS,
-  WORK_MODE_LABELS,
+  formatCleanText,
   formatCompensation,
   formatDateShort,
+  formatLocationWithMode,
 } from '@/lib/utils';
 import type { EnrichedOpportunity } from '@/types/domain';
 
@@ -78,7 +79,7 @@ export function OpportunityCard({
           to={`/opportunities/${opportunity.id}`}
           className="text-base sm:text-lg font-bold text-slate-900 hover:text-indigo-600 transition-colors"
         >
-          {opportunity.title}
+          {formatCleanText(opportunity.title)}
         </Link>
         <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-600">
           <span className="inline-flex items-center gap-1 font-semibold text-slate-800">
@@ -88,7 +89,7 @@ export function OpportunityCard({
           <span className="inline-flex items-center gap-1">
             <MapPin className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
             <span>
-              {opportunity.location} ({WORK_MODE_LABELS[opportunity.workMode]})
+              {formatLocationWithMode(opportunity.location, opportunity.workMode)}
             </span>
           </span>
           <span className="inline-flex items-center gap-1">
@@ -108,7 +109,7 @@ export function OpportunityCard({
 
       {/* Short Intelligence Summary */}
       <p className="mt-2.5 text-xs sm:text-sm text-slate-600 line-clamp-2 leading-relaxed">
-        {opportunity.analysis.shortSummary}
+        {formatCleanText(opportunity.analysis.shortSummary)}
       </p>
 
       {/* High-Risk Evidence Callout if Elevated Risk */}

@@ -2,6 +2,7 @@ import { createBlankCareerProfile } from './sample-data';
 import type {
   ApplicationRecord,
   CareerProfile,
+  EnrichedOpportunity,
   Opportunity,
   OpportunityAnalysis,
   OpportunitySkillRequirement,
@@ -22,18 +23,32 @@ export interface StoredAuthSession {
     avatarUrl?: string | null;
     createdAt: string;
   };
+  onboardingRequired?: boolean;
+  staleLoginFetchTriggered?: boolean;
 }
+
+export interface LocalFetchQuota {
+  fetchDateUtc: string;
+  triggersUsedToday: number;
+  triggersRemainingToday: number;
+  maxTriggersPerDay: number;
+  lastJobFetchAt: string | null;
+}
+
+const MAX_TRIGGERS_PER_DAY = 2;
 
 const KEYS = {
   authSession: `${STORAGE_VERSION}_auth_session`,
   profile: (userId: string) => `${STORAGE_VERSION}_profile_${userId}`,
   saved: (userId: string) => `${STORAGE_VERSION}_saved_${userId}`,
   applications: (userId: string) => `${STORAGE_VERSION}_applications_${userId}`,
+  fetchQuota: (userId: string) => `${STORAGE_VERSION}_fetch_quota_${userId}`,
   customOpportunities: `${STORAGE_VERSION}_opportunities`,
   customOrganizations: `${STORAGE_VERSION}_organizations`,
   customSources: `${STORAGE_VERSION}_sources`,
   customSkills: `${STORAGE_VERSION}_skills`,
   customAnalyses: `${STORAGE_VERSION}_analyses`,
+  cachedEnrichedOpportunities: `${STORAGE_VERSION}_cached_enriched_opportunities`,
 };
 
 function readJson<T>(key: string, fallback: T): T {
@@ -80,12 +95,59 @@ export const localStore = {
     }
   },
 
+  getFetchQuotaState(): LocalFetchQuota {
+    const uid = currentUserId();
+    const today = new Date().toISOString().slice(0, 10);
+    const stored = readJson<LocalFetchQuota | null>(KEYS.fetchQuota(uid), null);
+    if (!stored || stored.fetchDateUtc !== today) {
+      return {
+        fetchDateUtc: today,
+        triggersUsedToday: 0,
+        triggersRemainingToday: MAX_TRIGGERS_PER_DAY,
+        maxTriggersPerDay: MAX_TRIGGERS_PER_DAY,
+        lastJobFetchAt: stored?.lastJobFetchAt ?? null,
+      };
+    }
+    return {
+      ...stored,
+      triggersRemainingToday: Math.max(0, MAX_TRIGGERS_PER_DAY - stored.triggersUsedToday),
+      maxTriggersPerDay: MAX_TRIGGERS_PER_DAY,
+    };
+  },
+
+  consumeFetchQuota(): { allowed: boolean; quota: LocalFetchQuota } {
+    const uid = currentUserId();
+    const current = this.getFetchQuotaState();
+    if (current.triggersRemainingToday <= 0) {
+      return { allowed: false, quota: current };
+    }
+    const nextUsed = current.triggersUsedToday + 1;
+    const updated: LocalFetchQuota = {
+      fetchDateUtc: current.fetchDateUtc,
+      triggersUsedToday: nextUsed,
+      triggersRemainingToday: Math.max(0, MAX_TRIGGERS_PER_DAY - nextUsed),
+      maxTriggersPerDay: MAX_TRIGGERS_PER_DAY,
+      lastJobFetchAt: new Date().toISOString(),
+    };
+    writeJson(KEYS.fetchQuota(uid), updated);
+    return { allowed: true, quota: updated };
+  },
+
   getProfile(): CareerProfile {
     const uid = currentUserId();
-    return readJson<CareerProfile>(
+    const profile = readJson<CareerProfile>(
       KEYS.profile(uid),
       createBlankCareerProfile(uid, currentDisplayName())
     );
+    const quota = this.getFetchQuotaState();
+    return {
+      onboardingCompleted: false,
+      ...profile,
+      triggersUsedToday: quota.triggersUsedToday,
+      triggersRemainingToday: quota.triggersRemainingToday,
+      maxTriggersPerDay: quota.maxTriggersPerDay,
+      lastJobFetchAt: quota.lastJobFetchAt,
+    };
   },
 
   saveProfile(profile: CareerProfile): CareerProfile {
@@ -132,6 +194,23 @@ export const localStore = {
 
   getAllAnalyses(): Record<string, OpportunityAnalysis> {
     return readJson<Record<string, OpportunityAnalysis>>(KEYS.customAnalyses, {});
+  },
+
+  getCachedOpportunities(): EnrichedOpportunity[] {
+    return readJson<EnrichedOpportunity[]>(KEYS.cachedEnrichedOpportunities, []);
+  },
+
+  saveCachedOpportunities(items: EnrichedOpportunity[]): void {
+    writeJson(KEYS.cachedEnrichedOpportunities, items);
+  },
+
+  clearCachedOpportunities(): void {
+    if (typeof window === 'undefined') return;
+    try {
+      window.localStorage.removeItem(KEYS.cachedEnrichedOpportunities);
+    } catch {
+      // ignore storage errors
+    }
   },
 
   addCustomOpportunityBundle(bundle: {

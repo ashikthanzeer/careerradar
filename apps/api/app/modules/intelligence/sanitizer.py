@@ -1,3 +1,4 @@
+import html as html_lib
 import re
 from dataclasses import dataclass
 
@@ -7,6 +8,36 @@ class SanitizationResult:
     cleaned_text: str
     injection_detected: bool
     matched_patterns: list[str]
+
+
+def clean_html_to_text(raw: str | None) -> str:
+    """
+    Decodes single- or double-encoded HTML entities (e.g. &lt;div&gt; / &amp;quot;)
+    and strips HTML markup while preserving clean sentence and line boundaries.
+    """
+    if not raw:
+        return ""
+    text = str(raw)
+    for _ in range(3):
+        decoded = html_lib.unescape(text)
+        if decoded == text:
+            break
+        text = decoded
+
+    text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"</(?:p|div|li|h[1-6]|tr)\s*>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<(?:br|p|div|li|h[1-6]|tr)[^>]*>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+
+    # Decode once more in case entities appeared inside text nodes after tag removal
+    text = html_lib.unescape(text).replace("\xa0", " ")
+
+    lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = re.sub(r"[ \t\r\f\v]+", " ", raw_line).strip()
+        if line:
+            lines.append(line)
+    return "\n".join(lines).strip()
 
 
 # Adversarial patterns embedded in untrusted external listing descriptions
@@ -46,11 +77,11 @@ PROMPT_INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 def sanitize_untrusted_listing_text(raw_text: str) -> SanitizationResult:
     """
     Treats external internship descriptions as untrusted data (AGENTS.md §7.3, PRD §15).
-    Detects instruction-override attempts and neutralizes adversarial directives
-    before the text reaches any downstream LLM or structured extractor.
+    Strips HTML tags/entities, detects instruction-override attempts, and neutralizes
+    adversarial directives before text reaches any downstream LLM or structured extractor.
     """
     matched: list[str] = []
-    cleaned = raw_text
+    cleaned = clean_html_to_text(raw_text)
 
     for name, pattern in PROMPT_INJECTION_PATTERNS:
         found = pattern.search(cleaned)

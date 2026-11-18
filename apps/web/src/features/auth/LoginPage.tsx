@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 import { ArrowRight, CheckCircle2, Lock, Radar, ShieldCheck } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { authService } from '@/services/auth.service';
@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/Button';
 import { ThemeToggle } from '@/components/shared/ThemeToggle';
 
 export function LoginPage() {
-  const { signInWithProvider } = useAuth();
+  const { isAuthenticated, signInWithProvider } = useAuth();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const redirectTo = searchParams.get('redirect') || '/discover';
@@ -19,6 +19,11 @@ export function LoginPage() {
   const [email, setEmail] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+
+  // Persistent device session: if already signed in locally, never prompt login again
+  if (isAuthenticated) {
+    return <Navigate to={redirectTo} replace />;
+  }
 
   const handleGoogleClick = async () => {
     setError(null);
@@ -53,12 +58,16 @@ export function LoginPage() {
     setError(null);
     setIsLoading(true);
     try {
-      await signInWithProvider({
+      const created = await signInWithProvider({
         provider: 'google',
         email: cleanEmail,
         displayName: cleanName,
       });
-      navigate(redirectTo, { replace: true });
+      const destination =
+        created.onboardingRequired && redirectTo === '/discover'
+          ? '/onboarding'
+          : redirectTo;
+      navigate(destination, { replace: true });
     } catch (err) {
       setError(
         err instanceof Error ? err.message : 'Unable to complete Google sign-in.'
@@ -78,7 +87,15 @@ export function LoginPage() {
             </div>
             <span className="text-sm font-bold tracking-tight">CareerRadar</span>
           </Link>
-          <ThemeToggle />
+          <div className="flex items-center gap-3">
+            <Link
+              to="/about"
+              className="text-xs font-medium text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white"
+            >
+              About CareerRadar
+            </Link>
+            <ThemeToggle />
+          </div>
         </div>
       </header>
 
@@ -89,7 +106,7 @@ export function LoginPage() {
               Sign in to CareerRadar
             </h1>
             <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
-              Check jobs for scams, see how your skills match, and track all your applications in one place.
+              Check jobs from LinkedIn, Internshala &amp; Indeed for scams, see how your skills match, and track your applications.
             </p>
           </div>
 
@@ -128,7 +145,9 @@ export function LoginPage() {
                         d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96z"
                       />
                     </svg>
-                    <span>Continue with Google</span>
+                    <span>
+                      {isLoading ? 'Connecting to Google...' : 'Continue with Google'}
+                    </span>
                   </span>
                   <ArrowRight className="h-4 w-4 text-slate-400" />
                 </button>
@@ -186,7 +205,7 @@ export function LoginPage() {
               <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2 text-xs text-slate-500">
                 <div className="flex items-center gap-2">
                   <ShieldCheck className="h-4 w-4 text-emerald-600 shrink-0" />
-                  <span>Your saved jobs and interview notes are private to your account.</span>
+                  <span>Your login is saved on this device so refreshing never logs you out.</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <CheckCircle2 className="h-4 w-4 text-indigo-600 shrink-0" />

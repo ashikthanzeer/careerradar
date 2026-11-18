@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { authService, type OAuthProviderId } from '@/services/auth.service';
 import type { StoredAuthSession } from '@/lib/storage';
 
@@ -29,18 +29,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     authService.getCurrentSession()
   );
 
-  const signInWithProvider: AuthContextValue['signInWithProvider'] = async (
-    params
-  ) => {
-    const created = await authService.completeOAuthSignIn(params);
-    setSession(created);
-    return created;
-  };
+  // Sync cookie/server session on mount (handles Better Auth redirect callbacks without clearing valid local sessions)
+  useEffect(() => {
+    let active = true;
+    authService.refreshSession().then((synced) => {
+      if (active && synced) {
+        setSession(synced);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
-  const signOut = () => {
+  const signInWithProvider = useCallback<AuthContextValue['signInWithProvider']>(
+    async (params) => {
+      const created = await authService.completeOAuthSignIn(params);
+      setSession(created);
+      return created;
+    },
+    []
+  );
+
+  const signOut = useCallback(() => {
     authService.signOut();
     setSession(null);
-  };
+  }, []);
 
   return (
     <AuthContext.Provider
@@ -59,4 +73,3 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 export function useAuth() {
   return useContext(AuthContext);
 }
-

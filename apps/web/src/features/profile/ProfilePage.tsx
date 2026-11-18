@@ -3,8 +3,23 @@ import { useNavigate } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { CheckCircle2, Code2, Download, Plus, Trash2, UserCheck } from 'lucide-react';
-import { useCareerProfile, useUpdateCareerProfile } from '@/hooks/useProfile';
+import {
+  CheckCircle2,
+  Code2,
+  Download,
+  FileUp,
+  Globe,
+  Loader2,
+  Plus,
+  Trash2,
+  UserCheck,
+} from 'lucide-react';
+import {
+  useCareerProfile,
+  useExtractResume,
+  useExtractSources,
+  useUpdateCareerProfile,
+} from '@/hooks/useProfile';
 import { useAuth } from '@/hooks/useAuth';
 import { authService } from '@/services/auth.service';
 import { Card, CardContent, CardHeader } from '@/components/ui/Card';
@@ -13,10 +28,16 @@ import { Select } from '@/components/ui/Select';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { ErrorState, LoadingState } from '@/components/ui/StateFeedback';
-import { ROLE_CATEGORY_LABELS, WORK_MODE_LABELS } from '@/lib/utils';
+import {
+  COUNTRY_CITY_SUGGESTIONS,
+  NATIVE_COUNTRY_OPTIONS,
+  ROLE_CATEGORY_LABELS,
+  WORK_MODE_LABELS,
+} from '@/lib/utils';
 import type {
   CareerProfile,
   DomainCategory,
+  ProfileExtractionResult,
   RoleCategory,
   SkillProficiency,
   UserSkill,
@@ -37,6 +58,7 @@ const profileFormSchema = z.object({
   minimumMonthlyStipendINR: z.coerce
     .number()
     .min(0, 'Minimum stipend cannot be negative'),
+  nativeCountry: z.string().min(2, 'Select your native country'),
   preferredLocationsCsv: z.string().min(2, 'Specify at least one preferred location'),
   careerInterestsSummary: z
     .string()
@@ -70,6 +92,8 @@ const ALL_WORK_MODES: WorkMode[] = ['remote', 'hybrid', 'onsite'];
 export function ProfilePage() {
   const { data: profile, isLoading, error, refetch } = useCareerProfile();
   const updateProfileMutation = useUpdateCareerProfile();
+  const extractResumeMutation = useExtractResume();
+  const extractSourcesMutation = useExtractSources();
   const { signOut } = useAuth();
   const navigate = useNavigate();
 
@@ -83,15 +107,37 @@ export function ProfilePage() {
   const [newSkillProficiency, setNewSkillProficiency] =
     useState<SkillProficiency>('intermediate');
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importResumeText, setImportResumeText] = useState('');
+  const [importLinkedinUrl, setImportLinkedinUrl] = useState('');
+  const [importPortfolioUrl, setImportPortfolioUrl] = useState('');
+  const [importStatus, setImportStatus] = useState<string | null>(null);
 
   const {
     register,
     handleSubmit,
     reset,
+    setValue,
+    watch,
     formState: { errors },
   } = useForm<ProfileFormValues>({
     resolver: zodResolver(profileFormSchema),
   });
+
+  const watchedNativeCountry = watch('nativeCountry') || profile?.nativeCountry || 'India';
+  const watchedLocationsCsv = watch('preferredLocationsCsv') || '';
+
+  const togglePreferredCity = (city: string) => {
+    const existing = watchedLocationsCsv
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const exists = existing.some((c) => c.toLowerCase() === city.toLowerCase());
+    const next = exists
+      ? existing.filter((c) => c.toLowerCase() !== city.toLowerCase())
+      : [...existing, city];
+    setValue('preferredLocationsCsv', next.join(', '), { shouldDirty: true, shouldValidate: true });
+  };
 
   useEffect(() => {
     if (profile) {
@@ -103,6 +149,7 @@ export function ProfilePage() {
         graduationYear: profile.graduationYear,
         preferredDuration: profile.preferredDuration,
         minimumMonthlyStipendINR: profile.minimumMonthlyStipendINR,
+        nativeCountry: profile.nativeCountry || 'India',
         preferredLocationsCsv: profile.preferredLocations.join(', '),
         careerInterestsSummary: profile.careerInterestsSummary,
       });
@@ -110,6 +157,8 @@ export function ProfilePage() {
       setPreferredRoles(profile.preferredRoles);
       setPreferredDomains(profile.preferredDomains);
       setWorkModes(profile.workModes);
+      setImportLinkedinUrl(profile.linkedinUrl || '');
+      setImportPortfolioUrl(profile.portfolioUrl || '');
     }
   }, [profile, reset]);
 
@@ -171,6 +220,71 @@ export function ProfilePage() {
     );
   };
 
+  const applyExtractedData = (res: ProfileExtractionResult) => {
+    if (res.displayName) setValue('displayName', res.displayName);
+    if (res.educationLevel) setValue('educationLevel', res.educationLevel);
+    if (res.fieldOfStudy) setValue('fieldOfStudy', res.fieldOfStudy);
+    if (res.institution) setValue('institution', res.institution);
+    if (res.graduationYear) setValue('graduationYear', res.graduationYear);
+    if (res.careerInterestsSummary) {
+      setValue('careerInterestsSummary', res.careerInterestsSummary);
+    }
+    if (res.linkedinUrl) setImportLinkedinUrl(res.linkedinUrl);
+    if (res.portfolioUrl) setImportPortfolioUrl(res.portfolioUrl);
+    if (res.preferredRoles.length > 0) setPreferredRoles(res.preferredRoles);
+    if (res.preferredDomains.length > 0) setPreferredDomains(res.preferredDomains);
+    if (res.skills.length > 0) {
+      setSkills((prev) => {
+        const merged = [...prev];
+        const existing = new Set(prev.map((s) => s.canonicalName.toLowerCase()));
+        for (const sk of res.skills) {
+          if (!existing.has(sk.canonicalName.toLowerCase())) {
+            merged.push(sk);
+            existing.add(sk.canonicalName.toLowerCase());
+          }
+        }
+        return merged;
+      });
+    }
+    setImportStatus(res.extractionNotice);
+  };
+
+  const handleQuickResumeImport = async () => {
+    if (!importFile && importResumeText.trim().length < 15) {
+      setImportStatus('Upload a .pdf/.docx/.txt file or paste resume text to extract.');
+      return;
+    }
+    let fileBase64: string | undefined;
+    if (importFile) {
+      fileBase64 = await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () =>
+          resolve(
+            (typeof reader.result === 'string' ? reader.result : '').split(',').pop() || ''
+          );
+        reader.readAsDataURL(importFile);
+      });
+    }
+    const res = await extractResumeMutation.mutateAsync({
+      text: importResumeText.trim() || undefined,
+      filename: importFile?.name,
+      fileBase64,
+    });
+    applyExtractedData(res);
+  };
+
+  const handleQuickSourcesImport = async () => {
+    if (!importLinkedinUrl.trim() && !importPortfolioUrl.trim()) {
+      setImportStatus('Enter a LinkedIn profile URL or Portfolio Website URL first.');
+      return;
+    }
+    const res = await extractSourcesMutation.mutateAsync({
+      linkedinUrl: importLinkedinUrl.trim() || undefined,
+      portfolioUrl: importPortfolioUrl.trim() || undefined,
+    });
+    applyExtractedData(res);
+  };
+
   const onSubmit = async (values: ProfileFormValues) => {
     const updatedProfile: CareerProfile = {
       ...profile,
@@ -181,6 +295,7 @@ export function ProfilePage() {
       graduationYear: values.graduationYear,
       preferredDuration: values.preferredDuration.trim(),
       minimumMonthlyStipendINR: values.minimumMonthlyStipendINR,
+      nativeCountry: values.nativeCountry.trim() || 'India',
       preferredLocations: values.preferredLocationsCsv
         .split(',')
         .map((s) => s.trim())
@@ -192,13 +307,16 @@ export function ProfilePage() {
         preferredDomains.length > 0 ? preferredDomains : ['Developer Tools & Cloud'],
       workModes: workModes.length > 0 ? workModes : ['remote', 'hybrid'],
       skills,
+      onboardingCompleted: true,
+      linkedinUrl: importLinkedinUrl.trim() || null,
+      portfolioUrl: importPortfolioUrl.trim() || null,
     };
 
-    await updateProfileMutation.mutateAsync(updatedProfile);
+    const saved = await updateProfileMutation.mutateAsync(updatedProfile);
     setSaveMessage(
-      'Career profile saved. Compatibility scores and skill-gap analyses across all opportunities have been recomputed.'
+      `Career profile saved! Synced ${saved.nativeCountry || 'India'} + worldwide job alerts (${saved.triggersRemainingToday ?? 0} of ${saved.maxTriggersPerDay ?? 2} daily job fetches remaining).`
     );
-    setTimeout(() => setSaveMessage(null), 4000);
+    setTimeout(() => setSaveMessage(null), 5000);
   };
 
   return (
@@ -212,7 +330,97 @@ export function ProfilePage() {
             Configure your academic background, target roles, explicit technical skills, and project portfolio to power explainable opportunity matching.
           </p>
         </div>
+        <span className="text-xs font-medium text-slate-500">
+          Daily auto-fetch quota: {profile.triggersRemainingToday ?? 2}/
+          {profile.maxTriggersPerDay ?? 2} remaining
+        </span>
       </div>
+
+      {/* Quick Import from Resume, LinkedIn & Portfolio */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <FileUp className="h-4 w-4 text-indigo-600" />
+            <h2 className="text-base font-bold text-slate-900">
+              Auto-Fill from Resume (.pdf, .docx, .txt), LinkedIn &amp; Portfolio Website
+            </h2>
+          </div>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Saving after extraction updates your skill match and automatically fetches latest roles for your field into the shared database.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <label className="block text-xs font-semibold text-slate-700">
+                Resume Upload (.pdf, .docx, .txt) or Text
+              </label>
+                <input
+                type="file"
+                accept=".pdf,.docx,.txt,.md"
+                onChange={(e) => setImportFile(e.target.files?.[0] || null)}
+                className="block w-full text-xs text-slate-600 dark:text-slate-300 file:mr-3 file:rounded-md file:border file:border-slate-300 dark:file:border-slate-700 file:bg-white dark:file:bg-slate-800 file:text-slate-700 dark:file:text-slate-100 file:px-2.5 file:py-1 file:text-xs file:font-semibold"
+              />
+              <textarea
+                rows={2}
+                value={importResumeText}
+                onChange={(e) => setImportResumeText(e.target.value)}
+                placeholder="Or paste resume highlights..."
+                className="w-full rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-2 text-xs text-slate-900 dark:text-slate-100 placeholder:text-slate-400"
+              />
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={extractResumeMutation.isPending}
+                onClick={handleQuickResumeImport}
+              >
+                {extractResumeMutation.isPending ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <FileUp className="h-3.5 w-3.5" />
+                )}
+                <span>Extract from Resume</span>
+              </Button>
+            </div>
+
+            <div className="space-y-2">
+              <Input
+                label="LinkedIn URL"
+                placeholder="https://www.linkedin.com/in/..."
+                value={importLinkedinUrl}
+                onChange={(e) => setImportLinkedinUrl(e.target.value)}
+              />
+              <Input
+                label="Portfolio Website URL"
+                placeholder="https://your-site.dev"
+                value={importPortfolioUrl}
+                onChange={(e) => setImportPortfolioUrl(e.target.value)}
+              />
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={extractSourcesMutation.isPending}
+                onClick={handleQuickSourcesImport}
+              >
+                {extractSourcesMutation.isPending ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Globe className="h-3.5 w-3.5" />
+                )}
+                <span>Extract from LinkedIn / Portfolio</span>
+              </Button>
+            </div>
+          </div>
+
+          {importStatus && (
+            <p role="status" className="text-xs font-medium text-indigo-700 dark:text-indigo-300">
+              {importStatus}
+            </p>
+          )}
+        </CardContent>
+      </Card>
 
       {saveMessage && (
         <div
@@ -278,11 +486,51 @@ export function ProfilePage() {
                     error={errors.fieldOfStudy?.message}
                     {...register('fieldOfStudy')}
                   />
+                  <Select
+                    label="Native Country (min 30 local jobs/fetch) *"
+                    error={errors.nativeCountry?.message}
+                    {...register('nativeCountry')}
+                  >
+                    {NATIVE_COUNTRY_OPTIONS.map((country) => (
+                      <option key={country} value={country}>
+                        {country}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+
+                <div className="space-y-2">
                   <Input
-                    label="Preferred Locations (comma-separated) *"
+                    label="Preferred Places / Cities (comma-separated) *"
                     error={errors.preferredLocationsCsv?.message}
                     {...register('preferredLocationsCsv')}
                   />
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400 mr-1">
+                      Quick-pick ({watchedNativeCountry}):
+                    </span>
+                    {(COUNTRY_CITY_SUGGESTIONS[watchedNativeCountry] ?? ['Remote']).map((city) => {
+                      const active = watchedLocationsCsv
+                        .split(',')
+                        .map((s) => s.trim().toLowerCase())
+                        .filter(Boolean)
+                        .includes(city.toLowerCase());
+                      return (
+                        <button
+                          key={city}
+                          type="button"
+                          onClick={() => togglePreferredCity(city)}
+                          className={`rounded-md border px-2 py-0.5 text-xs font-medium transition-colors ${
+                            active
+                              ? 'border-indigo-600 bg-indigo-600 text-white'
+                              : 'border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700'
+                          }`}
+                        >
+                          {city}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -302,14 +550,14 @@ export function ProfilePage() {
                 <div>
                   <label
                     htmlFor="profile-interests"
-                    className="block text-xs font-semibold text-slate-700 mb-1.5"
+                    className="block text-xs font-semibold text-slate-700 dark:text-slate-200 mb-1.5"
                   >
                     Career Interests &amp; Engineering Focus *
                   </label>
                   <textarea
                     id="profile-interests"
                     rows={3}
-                    className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-indigo-600 focus:outline-none"
+                    className="w-full rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:border-indigo-600 focus:outline-none"
                     {...register('careerInterestsSummary')}
                   />
                   {errors.careerInterestsSummary && (
@@ -346,7 +594,7 @@ export function ProfilePage() {
                           onClick={() => toggleRole(role)}
                           className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${active
                             ? 'border-indigo-600 bg-indigo-600 text-white'
-                            : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+                            : 'border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700'
                             }`}
                         >
                           {ROLE_CATEGORY_LABELS[role]}
@@ -369,8 +617,8 @@ export function ProfilePage() {
                           type="button"
                           onClick={() => toggleDomain(domain)}
                           className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${active
-                            ? 'border-slate-900 bg-slate-900 text-white'
-                            : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+                            ? 'border-slate-900 dark:border-indigo-500 bg-slate-900 dark:bg-indigo-600 text-white'
+                            : 'border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700'
                             }`}
                         >
                           {domain}
@@ -394,7 +642,7 @@ export function ProfilePage() {
                           onClick={() => toggleWorkMode(mode)}
                           className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${active
                             ? 'border-emerald-700 bg-emerald-700 text-white'
-                            : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+                            : 'border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700'
                             }`}
                         >
                           {WORK_MODE_LABELS[mode]}

@@ -35,9 +35,10 @@ import {
   APPLICATION_STATUS_META,
   OPPORTUNITY_TYPE_LABELS,
   ROLE_CATEGORY_LABELS,
-  WORK_MODE_LABELS,
+  formatCleanText,
   formatCompensation,
   formatDateShort,
+  formatLocationWithMode,
 } from '@/lib/utils';
 import type { ApplicationStatus } from '@/types/domain';
 
@@ -152,7 +153,7 @@ export function OpportunityDetailPage() {
         </div>
 
         <h1 className="mt-4 text-2xl sm:text-3xl font-bold tracking-tight text-slate-900">
-          {opportunity.title}
+          {formatCleanText(opportunity.title)}
         </h1>
 
         <div className="mt-2.5 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs sm:text-sm text-slate-600">
@@ -163,7 +164,7 @@ export function OpportunityDetailPage() {
           <span className="inline-flex items-center gap-1.5">
             <MapPin className="h-4 w-4 text-slate-400" />
             <span>
-              {opportunity.location} ({WORK_MODE_LABELS[opportunity.workMode]})
+              {formatLocationWithMode(opportunity.location, opportunity.workMode)}
             </span>
           </span>
           <span className="inline-flex items-center gap-1.5">
@@ -206,7 +207,7 @@ export function OpportunityDetailPage() {
               href={opportunity.applicationUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3.5 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 shadow-sm"
+              className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3.5 py-2 text-sm font-medium text-slate-700 dark:text-slate-100 hover:bg-slate-50 dark:hover:bg-slate-700 shadow-sm"
             >
               <span>Open Original Listing</span>
               <ExternalLink className="h-4 w-4" />
@@ -258,7 +259,7 @@ export function OpportunityDetailPage() {
                   Executive Summary
                 </h3>
                 <p className="mt-1 text-slate-800 leading-relaxed">
-                  {opportunity.analysis.shortSummary}
+                  {formatCleanText(opportunity.analysis.shortSummary)}
                 </p>
                 <p className="mt-1.5 text-xs text-slate-600">
                   <strong className="font-semibold text-slate-800">
@@ -276,7 +277,7 @@ export function OpportunityDetailPage() {
                   {opportunity.analysis.responsibilities.map((resp, idx) => (
                     <li key={idx} className="flex items-start gap-2 text-slate-700">
                       <CheckCircle2 className="h-4 w-4 text-slate-400 shrink-0 mt-0.5" />
-                      <span>{resp}</span>
+                      <span>{formatCleanText(resp)}</span>
                     </li>
                   ))}
                 </ul>
@@ -340,7 +341,7 @@ export function OpportunityDetailPage() {
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="rounded-md border border-slate-200 bg-slate-50 p-4 text-xs sm:text-sm text-slate-800 leading-relaxed whitespace-pre-line">
-                {opportunity.description}
+                {formatCleanText(opportunity.description)}
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs text-slate-600 pt-2 border-t border-slate-100">
@@ -440,7 +441,7 @@ export function OpportunityDetailPage() {
                     defaultValue={currentApp?.nextAction ?? ''}
                     onChange={(e) => setNextActionInput(e.target.value)}
                     placeholder="e.g. Submit tailored resume & GitHub portfolio by Friday"
-                    className="w-full rounded-md border border-slate-300 px-3 py-1.5 text-xs sm:text-sm text-slate-900 focus:border-indigo-600 focus:outline-none"
+                    className="w-full rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs sm:text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:border-indigo-600 focus:outline-none"
                   />
                 </div>
 
@@ -457,7 +458,7 @@ export function OpportunityDetailPage() {
                     defaultValue={currentApp?.privateNotes ?? ''}
                     onChange={(e) => setPrivateNotesInput(e.target.value)}
                     placeholder="Record OA topics, interviewer names, or questions to ask..."
-                    className="w-full rounded-md border border-slate-300 px-3 py-1.5 text-xs sm:text-sm text-slate-900 focus:border-indigo-600 focus:outline-none"
+                    className="w-full rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs sm:text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:border-indigo-600 focus:outline-none"
                   />
                 </div>
 

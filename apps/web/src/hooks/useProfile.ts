@@ -24,3 +24,21 @@ export function useUpdateCareerProfile() {
   });
 }
 
+export function useExtractResume() {
+  return useMutation({
+    mutationFn: (input: { text?: string; filename?: string; fileBase64?: string }) =>
+      profileService.extractFromResume(input),
+  });
+}
+
+export function useExtractSources() {
+  return useMutation({
+    mutationFn: (input: {
+      linkedinUrl?: string;
+      portfolioUrl?: string;
+      githubUrl?: string;
+      pastedText?: string;
+    }) => profileService.extractFromSources(input),
+  });
+}
+

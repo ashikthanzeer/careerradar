@@ -5,12 +5,25 @@ import json
 import time
 from dataclasses import dataclass
 from typing import Any
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Cookie, Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import get_db
-from app.models.entities import User
+from app.models.entities import CareerProfile, User, utc_now_iso
+
+BETTER_AUTH_COOKIE_NAME = "better-auth.session_token"
+
+# Tracks explicitly deleted accounts so their existing JWT tokens cannot re-authenticate.
+_DELETED_USER_IDS: set[str] = set()
+
+
+def mark_user_deleted(user_id: str) -> None:
+    _DELETED_USER_IDS.add(user_id)
+
+
+def unmark_user_deleted(user_id: str) -> None:
+    _DELETED_USER_IDS.discard(user_id)
 
 
 @dataclass(frozen=True)
@@ -123,42 +136,81 @@ def create_oauth_state(provider: str) -> str:
     )
 
 
-def get_current_user(
+def extract_session_token(
     authorization: str | None = Header(default=None),
-    db: Session = Depends(get_db),
-) -> AuthenticatedUser:
-    """
-    Resolves the authenticated user strictly from the Authorization Bearer JWT header.
-    Rejects missing or invalid tokens with 401 Unauthorized.
-    """
-    if not authorization or not authorization.strip():
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required. Please sign in with Google.",
-        )
+    better_auth_cookie: str | None = Cookie(default=None, alias=BETTER_AUTH_COOKIE_NAME),
+) -> str | None:
+    if authorization and authorization.strip():
+        parts = authorization.strip().split(" ", 1)
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid Authorization header format. Expected 'Bearer <token>'.",
+            )
+        return parts[1].strip()
+    if better_auth_cookie and better_auth_cookie.strip():
+        return better_auth_cookie.strip()
+    return None
 
-    parts = authorization.strip().split(" ", 1)
-    if len(parts) != 2 or parts[0].lower() != "bearer":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Authorization header format. Expected 'Bearer <token>'.",
-        )
 
-    token = parts[1].strip()
+def resolve_user_from_token(db: Session, token: str) -> AuthenticatedUser:
     claims = verify_access_token(token)
     user_id = str(claims.get("sub", ""))
-    if not user_id:
+    if not user_id or user_id.startswith("oauth_state_"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid user subject in token.",
         )
 
-    user = db.scalar(select(User).where(User.id == user_id))
-    if user is None:
+    if user_id in _DELETED_USER_IDS:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User account not found or has been deleted.",
+            detail="User account has been deleted.",
         )
+
+    user = db.scalar(select(User).where(User.id == user_id))
+    if user is None:
+        email = str(claims.get("email", "")).strip().lower()
+        if not email or "@" not in email:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User account not found.",
+            )
+        now = utc_now_iso()
+        display_name = str(claims.get("name") or email.split("@")[0])
+        provider = str(claims.get("provider") or "google")
+        user = User(
+            id=user_id,
+            email=email,
+            display_name=display_name,
+            authentication_provider=provider,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(user)
+        db.flush()
+        db.add(
+            CareerProfile(
+                id=f"profile_{user.id}",
+                user_id=user.id,
+                display_name=user.display_name,
+                education_level="undergraduate",
+                field_of_study="Computer Science",
+                institution="University",
+                graduation_year=2027,
+                preferred_roles=["software_engineering"],
+                preferred_domains=["Developer Tools & Cloud"],
+                preferred_locations=["Remote"],
+                work_modes=["remote", "hybrid", "onsite"],
+                preferred_duration="3 to 6 months",
+                compensation_preference=0,
+                career_interests_summary="",
+                projects=[],
+                updated_at=now,
+            )
+        )
+        db.commit()
+        db.refresh(user)
 
     return AuthenticatedUser(
         id=user.id,
@@ -167,3 +219,19 @@ def get_current_user(
         provider=user.authentication_provider,
         avatar_url=user.avatar_url,
     )
+
+
+def get_current_user(
+    token: str | None = Depends(extract_session_token),
+    db: Session = Depends(get_db),
+) -> AuthenticatedUser:
+    """
+    Resolves the authenticated user from Authorization Bearer JWT or Better Auth cookie.
+    Rejects missing or invalid tokens with 401 Unauthorized.
+    """
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required. Please sign in with Google.",
+        )
+    return resolve_user_from_token(db, token)

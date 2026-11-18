@@ -6,7 +6,7 @@ from app.core.config import settings
 from app.core.database import Base, engine
 from app.core.errors import register_exception_handlers
 from app.modules.applications.router import router as applications_router
-from app.modules.auth.router import router as auth_router
+from app.modules.auth.router import better_auth_router, router as auth_router
 from app.modules.discovery.router import router as discovery_router
 from app.modules.ingestion.router import router as ingestion_router
 from app.modules.ml.router import router as ml_router
@@ -40,6 +40,7 @@ app.add_middleware(
 
 register_exception_handlers(app)
 
+app.include_router(better_auth_router)
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(profile_router, prefix="/api/v1")
 app.include_router(discovery_router, prefix="/api/v1")

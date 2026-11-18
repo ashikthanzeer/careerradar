@@ -16,12 +16,12 @@ apps/api/
 │   ├── main.py                      # FastAPI entrypoint, CORS, lifespan seeding, /health
 │   ├── seed.py                      # Idempotent seeder for 9 curated sample opportunities
 │   ├── core/
-│   │   ├── config.py                # Pydantic Settings (DATABASE_URL, GEMINI_API_KEY)
+│   │   ├── config.py                # Pydantic Settings (DATABASE_URL, GROQ_API_KEY, GROQ_MODEL)
 │   │   ├── database.py              # SQLAlchemy 2.0 engine & session management
 │   │   ├── auth.py                  # Bearer token auth & server-side user resolution
 │   │   └── errors.py                # Centralized error envelopes
 │   ├── models/
-│   │   └── entities.py              # All 13 relational tables from PRD §10
+│   │   └── entities.py              # Relational tables from PRD §10
 │   ├── schemas/
 │   │   └── api_schemas.py           # Strict Pydantic v2 schemas
 │   └── modules/
@@ -31,7 +31,7 @@ apps/api/
 │       └── intelligence/
 │           ├── sanitizer.py         # Prompt-injection detection & untrusted text sanitization
 │           ├── trust_engine.py      # Deterministic risk & credibility rule evaluator
-│           ├── extractor.py         # Gemini 4 Interactions API + deterministic fallback extractor
+│           ├── extractor.py         # Groq OpenAI-compatible JSON extractor + deterministic fallback
 │           └── matching_engine.py   # Explainable compatibility & skill-gap engine
 └── tests/
     ├── conftest.py

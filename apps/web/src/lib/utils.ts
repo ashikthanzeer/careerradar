@@ -52,7 +52,51 @@ export function formatDateShort(isoDate: string | null): string {
   });
 }
 
-export function getDaysUntil(isoDate: string | null, referenceDate = new Date('2026-11-17T12:00:00Z')): number | null {
+export function formatCleanText(raw: string | null | undefined): string {
+  if (!raw) return '';
+  let text = String(raw);
+  const namedEntities: Record<string, string> = {
+    '&amp;': '&',
+    '&lt;': '<',
+    '&gt;': '>',
+    '&quot;': '"',
+    '&#39;': "'",
+    '&apos;': "'",
+    '&nbsp;': ' ',
+  };
+  for (let pass = 0; pass < 3; pass += 1) {
+    const prev = text;
+    text = text
+      .replace(/&(amp|lt|gt|quot|apos|nbsp);|&#39;/gi, (m) => namedEntities[m.toLowerCase()] ?? m)
+      .replace(/&#(\d+);/g, (_m, dec) => String.fromCharCode(Number(dec)))
+      .replace(/&#x([0-9a-f]+);/gi, (_m, hex) => String.fromCharCode(parseInt(hex, 16)));
+    if (text === prev) break;
+  }
+  text = text
+    .replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<\/(?:p|div|li|h[1-6]|tr)\s*>/gi, ' ')
+    .replace(/<(?:br|p|div|li|h[1-6]|tr)[^>]*>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text;
+}
+
+export function formatLocationWithMode(location: string, workMode: WorkMode): string {
+  const cleanLoc = formatCleanText(location) || 'Remote';
+  const modeLabel = WORK_MODE_LABELS[workMode];
+  if (
+    workMode === 'unknown' ||
+    cleanLoc.toLowerCase().includes(modeLabel.toLowerCase()) ||
+    (workMode === 'remote' && cleanLoc.toLowerCase().includes('remote'))
+  ) {
+    return cleanLoc;
+  }
+  return `${cleanLoc} (${modeLabel})`;
+}
+
+export function getDaysUntil(isoDate: string | null, referenceDate = new Date()): number | null {
   if (!isoDate) return null;
   const target = new Date(isoDate);
   if (Number.isNaN(target.getTime())) return null;
@@ -178,5 +222,31 @@ export const APPLICATION_STATUS_META: Record<
     badgeClass: 'bg-slate-100 text-slate-500 border-slate-200',
     order: 9,
   },
+};
+
+export const NATIVE_COUNTRY_OPTIONS = [
+  'India',
+  'United States',
+  'United Kingdom',
+  'Canada',
+  'Germany',
+  'Singapore',
+  'Australia',
+  'Netherlands',
+  'France',
+  'Japan',
+] as const;
+
+export const COUNTRY_CITY_SUGGESTIONS: Record<string, string[]> = {
+  India: ['Bengaluru', 'Hyderabad', 'Pune', 'Mumbai', 'Chennai', 'Delhi NCR', 'Kochi', 'Remote'],
+  'United States': ['San Francisco', 'New York', 'Seattle', 'Austin', 'Boston', 'Remote'],
+  'United Kingdom': ['London', 'Cambridge', 'Manchester', 'Edinburgh', 'Remote'],
+  Canada: ['Toronto', 'Vancouver', 'Waterloo', 'Montreal', 'Remote'],
+  Germany: ['Berlin', 'Munich', 'Hamburg', 'Frankfurt', 'Remote'],
+  Singapore: ['Singapore', 'Remote'],
+  Australia: ['Sydney', 'Melbourne', 'Brisbane', 'Remote'],
+  Netherlands: ['Amsterdam', 'Rotterdam', 'Remote'],
+  France: ['Paris', 'Lyon', 'Remote'],
+  Japan: ['Tokyo', 'Osaka', 'Remote'],
 };
 

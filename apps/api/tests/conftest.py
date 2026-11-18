@@ -1,3 +1,9 @@
+import os
+
+os.environ["DATABASE_URL"] = "sqlite:///:memory:"
+os.environ["DIRECT_URL"] = "sqlite:///:memory:"
+os.environ["GROQ_API_KEY"] = ""
+
 from collections.abc import Generator
 import pytest
 from fastapi.testclient import TestClient

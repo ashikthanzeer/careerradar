@@ -1,6 +1,9 @@
+import { useEffect, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
+import { Link2, Loader2 } from 'lucide-react';
+import { useExtractJobUrl } from '@/hooks/useOpportunities';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
@@ -72,11 +75,33 @@ const createOpportunitySchema = z.object({
 
 type FormValues = z.infer<typeof createOpportunitySchema>;
 
+export interface JobPrefillData {
+  title?: string;
+  organizationName?: string;
+  officialWebsite?: string | null;
+  opportunityType?: CreateOpportunityInput['opportunityType'];
+  roleCategory?: CreateOpportunityInput['roleCategory'];
+  domain?: CreateOpportunityInput['domain'];
+  location?: string;
+  workMode?: CreateOpportunityInput['workMode'];
+  compensationMin?: number | null;
+  compensationCurrency?: 'INR' | 'USD' | 'EUR';
+  compensationPeriod?: CreateOpportunityInput['compensationPeriod'];
+  duration?: string;
+  deadline?: string | null;
+  applicationUrl?: string;
+  sourceName?: string;
+  description?: string;
+  extractionNotice?: string;
+  partialExtraction?: boolean;
+}
+
 interface SubmitOpportunityModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSubmitOpportunity: (input: CreateOpportunityInput) => Promise<void>;
   isSubmitting: boolean;
+  initialPrefill?: JobPrefillData | null;
 }
 
 export function SubmitOpportunityModal({
@@ -84,11 +109,18 @@ export function SubmitOpportunityModal({
   onClose,
   onSubmitOpportunity,
   isSubmitting,
+  initialPrefill,
 }: SubmitOpportunityModalProps) {
+  const extractUrlMutation = useExtractJobUrl();
+  const [extractNotice, setExtractNotice] = useState<string | null>(null);
+  const [extractPartial, setExtractPartial] = useState(false);
+
   const {
     register,
     handleSubmit,
     reset,
+    watch,
+    setValue,
     formState: { errors },
   } = useForm<FormValues>({
     resolver: zodResolver(createOpportunitySchema),
@@ -112,6 +144,74 @@ export function SubmitOpportunityModal({
       description: '',
     },
   });
+
+  useEffect(() => {
+    if (isOpen && initialPrefill) {
+      reset({
+        title: initialPrefill.title ?? '',
+        organizationName: initialPrefill.organizationName ?? '',
+        officialWebsite: initialPrefill.officialWebsite ?? '',
+        recruiterContactEmail: '',
+        opportunityType: initialPrefill.opportunityType ?? 'internship',
+        roleCategory: initialPrefill.roleCategory ?? 'software_engineering',
+        domain: initialPrefill.domain ?? 'Developer Tools & Cloud',
+        location: initialPrefill.location ?? 'Remote',
+        workMode: initialPrefill.workMode ?? 'remote',
+        compensationMin:
+          initialPrefill.compensationMin !== null &&
+          initialPrefill.compensationMin !== undefined
+            ? String(initialPrefill.compensationMin)
+            : '',
+        compensationCurrency: initialPrefill.compensationCurrency ?? 'INR',
+        compensationPeriod: initialPrefill.compensationPeriod ?? 'monthly',
+        duration: initialPrefill.duration ?? '6 months',
+        deadline: initialPrefill.deadline ?? '',
+        applicationUrl: initialPrefill.applicationUrl ?? 'https://',
+        sourceName: initialPrefill.sourceName ?? 'LinkedIn',
+        description: initialPrefill.description ?? '',
+      });
+      setExtractNotice(initialPrefill.extractionNotice ?? null);
+      setExtractPartial(Boolean(initialPrefill.partialExtraction));
+    } else if (!isOpen) {
+      setExtractNotice(null);
+      setExtractPartial(false);
+    }
+  }, [isOpen, initialPrefill, reset]);
+
+  const currentUrl = watch('applicationUrl');
+
+  const handleFetchFromUrl = async () => {
+    const trimmed = (currentUrl || '').trim();
+    if (!/^https?:\/\/.+/i.test(trimmed)) {
+      setExtractNotice('Enter a valid http:// or https:// job link first.');
+      setExtractPartial(true);
+      return;
+    }
+
+    try {
+      const extracted = await extractUrlMutation.mutateAsync(trimmed);
+      if (extracted.title) setValue('title', extracted.title);
+      if (extracted.organizationName) setValue('organizationName', extracted.organizationName);
+      if (extracted.officialWebsite) setValue('officialWebsite', extracted.officialWebsite);
+      if (extracted.location) setValue('location', extracted.location);
+      if (extracted.workMode) setValue('workMode', extracted.workMode);
+      if (extracted.opportunityType) setValue('opportunityType', extracted.opportunityType);
+      if (extracted.roleCategory) setValue('roleCategory', extracted.roleCategory);
+      if (extracted.domain) setValue('domain', extracted.domain);
+      if (extracted.sourceName) setValue('sourceName', extracted.sourceName);
+      if (extracted.compensationMin !== null && extracted.compensationMin !== undefined) {
+        setValue('compensationMin', String(extracted.compensationMin));
+      }
+      if (extracted.description) setValue('description', extracted.description);
+      setExtractNotice(extracted.extractionNotice);
+      setExtractPartial(extracted.partialExtraction);
+    } catch (err) {
+      setExtractNotice(
+        err instanceof Error ? err.message : 'Unable to fetch details from that URL.'
+      );
+      setExtractPartial(true);
+    }
+  };
 
   const onFormSubmit = async (values: FormValues) => {
     const parsedComp =
@@ -148,10 +248,56 @@ export function SubmitOpportunityModal({
       isOpen={isOpen}
       onClose={onClose}
       title="Check & Add a Job Listing"
-      subtitle="Paste a job listing from LinkedIn, Internshala, Wellfound, or a company website to check for scam red flags and see how your skills match."
+      subtitle="Paste a job URL from LinkedIn, Internshala, Indeed, or a company page to auto-fetch details, check for scams, and see your skill match."
       maxWidthClass="max-w-2xl"
     >
       <form onSubmit={handleSubmit(onFormSubmit)} className="space-y-4" noValidate>
+        {/* Job Link + Auto-Fetch Row */}
+        <div className="rounded-md border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/60 p-3.5 space-y-2.5">
+          <div className="flex flex-col sm:flex-row sm:items-end gap-2.5">
+            <div className="flex-1">
+              <Input
+                label="Job Link (URL from LinkedIn, Internshala, Indeed, or Company Site) *"
+                placeholder="https://www.linkedin.com/jobs/view/..."
+                error={errors.applicationUrl?.message}
+                {...register('applicationUrl')}
+              />
+            </div>
+            <Button
+              type="button"
+              variant="secondary"
+              size="md"
+              disabled={extractUrlMutation.isPending}
+              onClick={handleFetchFromUrl}
+              className="shrink-0"
+            >
+              {extractUrlMutation.isPending ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span>Fetching...</span>
+                </>
+              ) : (
+                <>
+                  <Link2 className="h-4 w-4" />
+                  <span>Fetch Details from Link</span>
+                </>
+              )}
+            </Button>
+          </div>
+
+          {extractNotice && (
+            <p
+              className={`text-xs rounded px-2.5 py-1.5 border ${
+                extractPartial
+                  ? 'border-amber-200 bg-amber-50 text-amber-900'
+                  : 'border-emerald-200 bg-emerald-50 text-emerald-900'
+              }`}
+            >
+              {extractNotice}
+            </p>
+          )}
+        </div>
+
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <Input
             label="Job Title *"
@@ -167,30 +313,21 @@ export function SubmitOpportunityModal({
           />
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <Input
-            label="Application Link (URL) *"
-            placeholder="https://..."
-            error={errors.applicationUrl?.message}
-            {...register('applicationUrl')}
-          />
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <Input
             label="Where did you find it? *"
-            placeholder="e.g. LinkedIn, Company Website"
+            placeholder="e.g. LinkedIn, Internshala"
             error={errors.sourceName?.message}
             {...register('sourceName')}
           />
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <Input
-            label="Company Website (Optional — helps verify safety)"
+            label="Company Website (Optional)"
             placeholder="https://company.com"
             error={errors.officialWebsite?.message}
             {...register('officialWebsite')}
           />
           <Input
-            label="Recruiter Email (Optional — checks for fake domains)"
+            label="Recruiter Email (Optional)"
             placeholder="hr@company.com"
             error={errors.recruiterContactEmail?.message}
             {...register('recruiterContactEmail')}

@@ -16,11 +16,25 @@ from app.models.entities import (
     TrustEvidence,
     utc_now_iso,
 )
+from app.modules.ingestion.deduplicator import detect_duplicate_opportunity
+from app.modules.ingestion.freshness import (
+    is_listing_text_closed,
+    is_opportunity_expired,
+)
+from app.modules.ingestion.normalizer import (
+    NON_TECHNICAL_TITLE_PATTERN,
+    TECHNICAL_ROLE_PATTERN,
+    is_native_country_location,
+    normalize_application_url,
+    normalize_organization_name,
+    normalize_role_title,
+)
 from app.modules.intelligence.extractor import extract_opportunity_intelligence
 from app.modules.intelligence.matching_engine import (
     analyze_skill_gap,
     compute_recommendation_match,
 )
+from app.modules.intelligence.sanitizer import clean_html_to_text
 from app.modules.intelligence.trust_engine import evaluate_opportunity_trust
 from app.modules.profile.service import get_or_create_profile
 from app.schemas.api_schemas import (
@@ -39,11 +53,55 @@ from app.schemas.api_schemas import (
 )
 
 
+def _is_opportunity_compliant_for_profile(
+    item: EnrichedOpportunitySchema, profile: CareerProfileSchema
+) -> bool:
+    pref_locs = [p.strip().lower() for p in profile.preferredLocations if p.strip()]
+    pref_modes = [m.strip().lower() for m in profile.workModes if m.strip()]
+    pref_roles = {r.strip().lower() for r in profile.preferredRoles if r.strip()}
+    pref_domains = {d.strip().lower() for d in profile.preferredDomains if d.strip()}
+
+    item_loc = (item.location or "").lower()
+    item_mode = (item.workMode or "").lower()
+
+    if pref_locs:
+        wants_remote = any("remote" in p for p in pref_locs)
+        cities = [p for p in pref_locs if "remote" not in p]
+        matches_remote = wants_remote and (item_mode == "remote" or "remote" in item_loc)
+        matches_city = any(
+            (c in item_loc or (c == "bengaluru" and "bangalore" in item_loc))
+            for c in cities
+        )
+        if matches_remote:
+            loc_ok = True
+        elif matches_city:
+            loc_ok = True if not pref_modes else item_mode in pref_modes
+        else:
+            loc_ok = False
+    else:
+        loc_ok = True if not pref_modes else item_mode in pref_modes
+
+    role_ok = not pref_roles or (item.roleCategory or "").lower() in pref_roles
+    domain_ok = not pref_domains or (item.domain or "").lower() in pref_domains
+    return loc_ok and (role_ok or domain_ok)
+
+
+def _has_html_artifacts(text: str | None) -> bool:
+    if not text:
+        return False
+    lower = text.lower()
+    return any(
+        tok in lower
+        for tok in ("&lt;", "&gt;", "&quot;", "&#", "&amp;", "<div", "<p>", "<span", "<strong", "</")
+    )
+
+
 def _persist_trust_and_analysis(
     db: Session,
     opportunity: Opportunity,
     organization: Organization,
     force_refresh: bool = False,
+    allow_llm: bool = False,
 ) -> tuple[
     list[OpportunitySkillRequirementSchema],
     OpportunityAnalysisSchema,
@@ -61,9 +119,14 @@ def _persist_trust_and_analysis(
         )
     ).all()
 
-    if existing_analysis is None or force_refresh or not opp_skill_rows:
+    if existing_analysis is not None and _has_html_artifacts(
+        (existing_analysis.structured_result or {}).get("shortSummary")
+    ):
+        force_refresh = True
+
+    if existing_analysis is None or force_refresh:
         extracted_skills, analysis_schema = extract_opportunity_intelligence(
-            opportunity
+            opportunity, allow_llm=allow_llm
         )
         if existing_analysis is None:
             existing_analysis = OpportunityAnalysis(
@@ -229,13 +292,23 @@ def enrich_opportunity_for_user(
         )
     ).all()
 
+    if _has_html_artifacts(opportunity.title):
+        opportunity.title = clean_html_to_text(opportunity.title)
+    if _has_html_artifacts(opportunity.description):
+        opportunity.description = clean_html_to_text(opportunity.description)
+        force_refresh_analysis = True
+
     skills_schema, analysis_schema, trust_schema = _persist_trust_and_analysis(
-        db, opportunity, org, force_refresh=force_refresh_analysis
+        db,
+        opportunity,
+        org,
+        force_refresh=force_refresh_analysis,
+        allow_llm=force_refresh_analysis,
     )
 
     skill_gap = analyze_skill_gap(opportunity, skills_schema, profile)
     recommendation = compute_recommendation_match(
-        opportunity, analysis_schema, skill_gap, profile
+        opportunity, analysis_schema, skill_gap, profile, organization=org
     )
 
     app_row = apps_by_opp_id.get(opportunity.id)
@@ -336,9 +409,10 @@ def list_opportunities_for_user(
     paid_only: bool = False,
     skill: str | None = None,
     source: str | None = None,
+    region: str | None = None,
     sort_by: str = "relevance",
     page: int = 1,
-    page_size: int = 6,
+    page_size: int = 12,
 ) -> PaginatedResponseSchema[EnrichedOpportunitySchema]:
     profile = get_or_create_profile(db, user_id)
     saved_ids = {
@@ -354,10 +428,31 @@ def list_opportunities_for_user(
         ).all()
     }
 
+    now_iso = utc_now_iso()
     all_opps = db.scalars(select(Opportunity)).all()
+    active_opps: list[Opportunity] = []
+    for opp in all_opps:
+        expired, _ = is_opportunity_expired(
+            opp.deadline, opp.posted_at or opp.first_seen_at, reference_iso=now_iso
+        )
+        if not expired and is_listing_text_closed(opp.title, opp.description):
+            expired = True
+        if expired or opp.status == "expired":
+            if opp.status != "expired":
+                opp.status = "expired"
+            continue
+        if (
+            opp.id not in saved_ids
+            and opp.id not in apps_by_opp_id
+            and NON_TECHNICAL_TITLE_PATTERN.search(opp.title)
+            and not TECHNICAL_ROLE_PATTERN.search(opp.title)
+        ):
+            continue
+        active_opps.append(opp)
+
     enriched = [
         enrich_opportunity_for_user(db, opp, profile, saved_ids, apps_by_opp_id)
-        for opp in all_opps
+        for opp in active_opps
     ]
     db.commit()
 
@@ -418,6 +513,13 @@ def list_opportunities_for_user(
             if not any(target_source in src.sourceName.lower() for src in item.sources):
                 continue
 
+        if region == "native":
+            if not is_native_country_location(item.location, profile.nativeCountry):
+                continue
+        elif region == "worldwide":
+            if is_native_country_location(item.location, profile.nativeCountry):
+                continue
+
         filtered.append(item)
 
     if sort_by == "deadline_asc":
@@ -435,6 +537,19 @@ def list_opportunities_for_user(
             + (-50 if x.trustAssessment.overallLabel == "elevated_risk" else 0),
             reverse=True,
         )
+
+    compliant_items = [
+        item for item in filtered if _is_opportunity_compliant_for_profile(item, profile)
+    ]
+    non_compliant_items = [
+        item for item in filtered if not _is_opportunity_compliant_for_profile(item, profile)
+    ]
+    if profile.onboardingCompleted and len(compliant_items) >= 8:
+        max_non_compliant = len(compliant_items) // 3
+        allowed_ids = {item.id for item in compliant_items} | {
+            item.id for item in non_compliant_items[:max_non_compliant]
+        }
+        filtered = [item for item in filtered if item.id in allowed_ids]
 
     safe_page_size = max(1, min(100, page_size))
     total = len(filtered)
@@ -495,39 +610,98 @@ def create_and_evaluate_opportunity(
     db: Session, user_id: str, payload: CreateOpportunityInputSchema
 ) -> EnrichedOpportunitySchema:
     now = utc_now_iso()
+    expired, exp_reason = is_opportunity_expired(payload.deadline, None, reference_iso=now)
+    if expired:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=exp_reason,
+        )
+
+    norm_org = normalize_organization_name(payload.organizationName)
+    norm_title = normalize_role_title(payload.title)
+    canonical_url = normalize_application_url(payload.applicationUrl)
+
+    existing_opps = list(db.scalars(select(Opportunity)).all())
+    orgs_by_id = {o.id: o for o in db.scalars(select(Organization)).all()}
+    all_sources = list(db.scalars(select(OpportunitySource)).all())
+    sources_by_opp_id: dict[str, list[OpportunitySource]] = {}
+    for s in all_sources:
+        sources_by_opp_id.setdefault(s.opportunity_id, []).append(s)
+
     suffix = f"{int(time.time() * 1000)}"
-    org_id = f"org_custom_{suffix}"
-    opp_id = f"opp_custom_{suffix}"
-
-    email_domain: str | None = None
-    if payload.recruiterContactEmail and "@" in payload.recruiterContactEmail:
-        email_domain = payload.recruiterContactEmail.split("@", 1)[1].lower()
-
-    org = Organization(
-        id=org_id,
-        name=payload.organizationName.strip(),
-        normalized_name=payload.organizationName.strip().lower(),
-        official_website=payload.officialWebsite.strip()
-        if payload.officialWebsite and payload.officialWebsite.strip()
-        else None,
-        description=f"User-submitted organization record for {payload.organizationName.strip()}.",
-        recruiter_email_domain=email_domain,
-        verification_metadata={
-            "domainVerified": bool(
-                payload.officialWebsite and payload.officialWebsite.strip()
-            ),
-            "hasPublicEngineeringFootprint": False,
-            "knownEntity": False,
-            "notes": "Submitted via Opportunity Evaluator API.",
-        },
+    dup_match = detect_duplicate_opportunity(
+        candidate_title=payload.title,
+        candidate_org_name=payload.organizationName,
+        candidate_app_url=payload.applicationUrl,
+        candidate_location=payload.location,
+        candidate_description=payload.description,
+        candidate_source_name=payload.sourceName,
+        candidate_external_id=f"sub_{suffix}",
+        existing_opportunities=existing_opps,
+        orgs_by_id=orgs_by_id,
+        sources_by_opp_id=sources_by_opp_id,
     )
-    db.add(org)
+    if dup_match.matched_opportunity_id:
+        target_opp = next(
+            (o for o in existing_opps if o.id == dup_match.matched_opportunity_id), None
+        )
+        if target_opp is not None:
+            target_opp.last_seen_at = now
+            opp_sources = sources_by_opp_id.get(target_opp.id, [])
+            if not any(
+                s.source_name.lower() == payload.sourceName.strip().lower()
+                for s in opp_sources
+            ):
+                db.add(
+                    OpportunitySource(
+                        id=f"src_dup_{suffix}",
+                        opportunity_id=target_opp.id,
+                        source_name=payload.sourceName.strip(),
+                        source_url=canonical_url,
+                        external_id=f"ext_{suffix}",
+                        source_published_at=now,
+                        last_checked_at=now,
+                        source_status="active",
+                    )
+                )
+            db.flush()
+            return get_opportunity_for_user(db, user_id, target_opp.id, force_refresh_analysis=True)
 
+    org = next((o for o in orgs_by_id.values() if o.normalized_name == norm_org), None)
+    if org is None:
+        org_id = f"org_custom_{suffix}"
+        email_domain: str | None = None
+        if payload.recruiterContactEmail and "@" in payload.recruiterContactEmail:
+            email_domain = payload.recruiterContactEmail.split("@", 1)[1].lower()
+
+        org = Organization(
+            id=org_id,
+            name=payload.organizationName.strip(),
+            normalized_name=norm_org,
+            official_website=payload.officialWebsite.strip()
+            if payload.officialWebsite and payload.officialWebsite.strip()
+            else None,
+            description=f"User-submitted organization record for {payload.organizationName.strip()}.",
+            recruiter_email_domain=email_domain,
+            verification_metadata={
+                "domainVerified": bool(
+                    payload.officialWebsite and payload.officialWebsite.strip()
+                ),
+                "hasPublicEngineeringFootprint": False,
+                "knownEntity": False,
+                "notes": "Submitted via Opportunity Evaluator API.",
+            },
+        )
+        db.add(org)
+    else:
+        org_id = org.id
+
+    opp_id = f"opp_custom_{suffix}"
     opp = Opportunity(
         id=opp_id,
         organization_id=org_id,
         title=payload.title.strip(),
-        normalized_title=payload.title.strip().lower(),
+        normalized_title=norm_title,
         description=payload.description.strip(),
         opportunity_type=payload.opportunityType,
         role_category=payload.roleCategory,
@@ -543,7 +717,7 @@ def create_and_evaluate_opportunity(
         duration=payload.duration.strip(),
         posted_at=now,
         deadline=payload.deadline,
-        application_url=payload.applicationUrl.strip(),
+        application_url=canonical_url,
         recruiter_contact_email=payload.recruiterContactEmail.strip()
         if payload.recruiterContactEmail and payload.recruiterContactEmail.strip()
         else None,
@@ -560,7 +734,7 @@ def create_and_evaluate_opportunity(
         id=f"src_custom_{suffix}",
         opportunity_id=opp_id,
         source_name=payload.sourceName.strip(),
-        source_url=payload.applicationUrl.strip(),
+        source_url=canonical_url,
         external_id=f"ext_{suffix}",
         source_published_at=now,
         last_checked_at=now,

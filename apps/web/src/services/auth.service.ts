@@ -1,4 +1,5 @@
 import { API_CONFIG, apiRequest } from './api-client';
+import { authClient, type BetterAuthSocialResult } from '@/lib/auth-client';
 import { localStore, type StoredAuthSession } from '@/lib/storage';
 
 export type OAuthProviderId = 'google';
@@ -12,24 +13,19 @@ export interface OAuthAuthorizeInfo {
 
 export const authService = {
   getCurrentSession(): StoredAuthSession | null {
-    return localStore.getAuthSession();
+    return authClient.getLocalSession();
   },
 
   async initiateOAuth(provider: OAuthProviderId): Promise<OAuthAuthorizeInfo> {
-    if (API_CONFIG.dataMode !== 'mock') {
-      try {
-        return await apiRequest<OAuthAuthorizeInfo>(
-          `/auth/oauth/${provider}/authorize`
-        );
-      } catch {
-        // Fallback when running frontend standalone without backend process
-      }
-    }
+    const res: BetterAuthSocialResult = await authClient.signIn.social({
+      provider,
+      callbackURL: '/discover',
+    });
     return {
       provider,
-      configuredClientCredentials: false,
-      authorizationUrl: null,
-      state: `local_state_${provider}_${Date.now()}`,
+      configuredClientCredentials: res.configuredClientCredentials,
+      authorizationUrl: res.url,
+      state: res.state,
     };
   },
 
@@ -40,59 +36,11 @@ export const authService = {
     email?: string;
     displayName?: string;
   }): Promise<StoredAuthSession> {
-    if (API_CONFIG.dataMode !== 'mock') {
-      try {
-        const res = await apiRequest<{
-          accessToken: string;
-          user: StoredAuthSession['user'];
-        }>(`/auth/oauth/${params.provider}/callback`, {
-          method: 'POST',
-          body: JSON.stringify({
-            code: params.code,
-            state: params.state,
-            email: params.email,
-            displayName: params.displayName,
-          }),
-        });
-        const session: StoredAuthSession = {
-          accessToken: res.accessToken,
-          user: res.user,
-        };
-        localStore.saveAuthSession(session);
-        return session;
-      } catch (err) {
-        if (params.code) throw err;
-      }
-    }
+    return authClient.completeOAuthCallback(params);
+  },
 
-    const email = (params.email || `user@${params.provider}.com`).trim().toLowerCase();
-    const displayName =
-      params.displayName?.trim() || email.split('@')[0] || 'Jobseeker';
-    const idHash = Array.from(email)
-      .reduce((acc, ch) => (acc * 31 + ch.charCodeAt(0)) >>> 0, 7)
-      .toString(16);
-
-    const session: StoredAuthSession = {
-      accessToken: `local_jwt_${params.provider}_${idHash}`,
-      user: {
-        id: `usr_${idHash}`,
-        email,
-        displayName,
-        provider: params.provider,
-        createdAt: new Date().toISOString(),
-      },
-    };
-    localStore.saveAuthSession(session);
-
-    // Ensure profile displayName matches user's sign-in name
-    const currentProfile = localStore.getProfile();
-    localStore.saveProfile({
-      ...currentProfile,
-      userId: session.user.id,
-      displayName: session.user.displayName,
-    });
-
-    return session;
+  async refreshSession(): Promise<StoredAuthSession | null> {
+    return authClient.refreshServerSession();
   },
 
   async exportAccountData(): Promise<Record<string, unknown>> {
@@ -124,7 +72,6 @@ export const authService = {
   },
 
   signOut(): void {
-    localStore.saveAuthSession(null);
+    void authClient.signOut();
   },
 };
-

@@ -91,8 +91,8 @@ export function ApplicationsPage() {
           onClick={() => setStatusFilter('all')}
           className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
             statusFilter === 'all'
-              ? 'border-slate-900 bg-slate-900 text-white'
-              : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+              ? 'border-slate-900 dark:border-indigo-500 bg-slate-900 dark:bg-indigo-600 text-white'
+              : 'border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700'
           }`}
         >
           All Stages ({applications.length})
@@ -110,7 +110,7 @@ export function ApplicationsPage() {
               className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-colors tabular-nums ${
                 isActive
                   ? 'border-indigo-600 bg-indigo-600 text-white'
-                  : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                  : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700'
               }`}
             >
               {meta.label} ({count})

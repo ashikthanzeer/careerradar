@@ -28,6 +28,7 @@ export function createBlankCareerProfile(
     preferredRoles: ['software_engineering'],
     preferredDomains: ['Developer Tools & Cloud'],
     preferredLocations: ['Remote'],
+    nativeCountry: 'India',
     workModes: ['remote', 'hybrid', 'onsite'],
     preferredDuration: '3 to 6 months',
     minimumMonthlyStipendINR: 0,

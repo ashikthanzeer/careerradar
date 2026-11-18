@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Literal
+from urllib.parse import urlparse
 from app.models.entities import Opportunity, OpportunitySource, Organization
 from app.modules.ingestion.normalizer import (
     jaccard_similarity,
@@ -55,6 +56,12 @@ def detect_duplicate_opportunity(
                     similarity_score=1.0,
                 )
 
+    parsed_cand_url = urlparse(norm_cand_url) if norm_cand_url else None
+    has_specific_url = bool(
+        parsed_cand_url
+        and (len(parsed_cand_url.path.strip("/")) > 3 or bool(parsed_cand_url.query))
+    )
+
     # Pass 2: Canonical Application URL or Multi-Attribute Organization + Title + Content match
     for opp in existing_opportunities:
         org = orgs_by_id.get(opp.organization_id)
@@ -62,6 +69,14 @@ def detect_duplicate_opportunity(
             normalize_organization_name(org.name) if org else ""
         )
         existing_url_norm = normalize_application_url(opp.application_url)
+
+        if has_specific_url and norm_cand_url == existing_url_norm:
+            return DeduplicationMatch(
+                status="cross_source_duplicate",
+                matched_opportunity_id=opp.id,
+                matched_reason="Exact canonical application URL match",
+                similarity_score=0.99,
+            )
 
         # Organization identity check (never merge across distinct organizations!)
         org_matches = (
@@ -95,8 +110,16 @@ def detect_duplicate_opportunity(
         loc_compatible = (
             candidate_location.strip().lower() in opp.location.strip().lower()
             or opp.location.strip().lower() in candidate_location.strip().lower()
-            or "remote" in candidate_location.lower() and "remote" in opp.location.lower()
+            or ("remote" in candidate_location.lower() and "remote" in opp.location.lower())
         )
+
+        if norm_cand_title == existing_title_norm and loc_compatible:
+            return DeduplicationMatch(
+                status="cross_source_duplicate",
+                matched_opportunity_id=opp.id,
+                matched_reason="Matching organization, normalized role title, and location",
+                similarity_score=0.95,
+            )
 
         composite_sim = round(title_sim * 0.5 + desc_sim * 0.5, 3)
         if title_sim >= 0.60 and desc_sim >= 0.45 and loc_compatible:

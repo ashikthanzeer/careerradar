@@ -19,7 +19,9 @@ export const applicationsService = {
   async listSavedOpportunities(): Promise<SavedOpportunity[]> {
     if (API_CONFIG.dataMode !== 'mock') {
       try {
-        return await apiRequest<SavedOpportunity[]>('/saved-opportunities');
+        const items = await apiRequest<SavedOpportunity[]>('/saved-opportunities');
+        localStore.saveSavedOpportunities(items);
+        return items;
       } catch (err) {
         if (API_CONFIG.dataMode === 'api') throw err;
       }
@@ -44,6 +46,7 @@ export const applicationsService = {
           });
         }
         const updated = await apiRequest<SavedOpportunity[]>('/saved-opportunities');
+        localStore.saveSavedOpportunities(updated);
         return { saved: !exists, items: updated };
       } catch (err) {
         if (API_CONFIG.dataMode === 'api') throw err;
@@ -75,7 +78,9 @@ export const applicationsService = {
   async listApplications(): Promise<ApplicationRecord[]> {
     if (API_CONFIG.dataMode !== 'mock') {
       try {
-        return await apiRequest<ApplicationRecord[]>('/applications');
+        const items = await apiRequest<ApplicationRecord[]>('/applications');
+        localStore.saveApplications(items);
+        return items;
       } catch (err) {
         if (API_CONFIG.dataMode === 'api') throw err;
       }
@@ -86,10 +91,16 @@ export const applicationsService = {
   async upsertApplication(input: UpsertApplicationInput): Promise<ApplicationRecord> {
     if (API_CONFIG.dataMode !== 'mock') {
       try {
-        return await apiRequest<ApplicationRecord>('/applications', {
+        const upserted = await apiRequest<ApplicationRecord>('/applications', {
           method: 'POST',
           body: JSON.stringify(input),
         });
+        const existing = localStore.getApplications();
+        localStore.saveApplications([
+          upserted,
+          ...existing.filter((a) => a.opportunityId !== upserted.opportunityId),
+        ]);
+        return upserted;
       } catch (err) {
         if (API_CONFIG.dataMode === 'api') throw err;
       }
@@ -154,13 +165,18 @@ export const applicationsService = {
   ): Promise<ApplicationRecord> {
     if (API_CONFIG.dataMode !== 'mock') {
       try {
-        return await apiRequest<ApplicationRecord>(
+        const updated = await apiRequest<ApplicationRecord>(
           `/applications/${applicationId}`,
           {
             method: 'PATCH',
             body: JSON.stringify(patch),
           }
         );
+        const existing = localStore.getApplications();
+        localStore.saveApplications(
+          existing.map((a) => (a.id === updated.id ? updated : a))
+        );
+        return updated;
       } catch (err) {
         if (API_CONFIG.dataMode === 'api') throw err;
       }
@@ -196,6 +212,9 @@ export const applicationsService = {
     if (API_CONFIG.dataMode !== 'mock') {
       try {
         await apiRequest(`/applications/${applicationId}`, { method: 'DELETE' });
+        localStore.saveApplications(
+          localStore.getApplications().filter((a) => a.id !== applicationId)
+        );
         return;
       } catch (err) {
         if (API_CONFIG.dataMode === 'api') throw err;

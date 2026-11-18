@@ -11,7 +11,11 @@ from app.models.entities import (
 )
 from app.modules.discovery.service import _persist_trust_and_analysis
 from app.modules.ingestion.deduplicator import detect_duplicate_opportunity
-from app.modules.ingestion.freshness import evaluate_opportunity_freshness
+from app.modules.ingestion.freshness import (
+    evaluate_opportunity_freshness,
+    is_listing_text_closed,
+    is_opportunity_expired,
+)
 from app.modules.ingestion.normalizer import (
     normalize_application_url,
     normalize_organization_name,
@@ -37,6 +41,7 @@ class RawFeedItemSchema(BaseModel):
     compensationCurrency: str | None = "INR"
     compensationPeriod: str = "monthly"
     duration: str = "6 months"
+    postedAt: str | None = None
     deadline: str | None = None
     applicationUrl: str = Field(min_length=8)
     description: str = Field(min_length=20)
@@ -63,6 +68,7 @@ class IngestionRunReportSchema(BaseModel):
     newOpportunitiesCreated: int
     idempotentUpdates: int
     crossSourceDuplicatesMerged: int
+    skippedExpired: int = 0
     outcomes: list[IngestionRecordOutcomeSchema]
 
 
@@ -84,6 +90,7 @@ def run_ingestion_batch(
     new_count = 0
     idempotent_count = 0
     merged_count = 0
+    skipped_expired_count = 0
     outcomes: list[IngestionRecordOutcomeSchema] = []
 
     for idx, item in enumerate(feed_items):
@@ -105,15 +112,70 @@ def run_ingestion_batch(
             sources_by_opp_id=sources_by_opp_id,
         )
 
+        expired, exp_reason = is_opportunity_expired(
+            item.deadline, item.postedAt, reference_iso=now
+        )
+        if not expired and is_listing_text_closed(item.title, item.description):
+            expired = True
+            exp_reason = "Listing indicates applications are closed or the position is no longer available."
+        if expired:
+            matched_id = match.matched_opportunity_id or ""
+            if matched_id:
+                target_opp = next((o for o in existing_opps if o.id == matched_id), None)
+                if target_opp is not None:
+                    target_opp.status = "expired"
+                    target_opp.last_seen_at = now
+            skipped_expired_count += 1
+            outcomes.append(
+                IngestionRecordOutcomeSchema(
+                    externalId=item.externalId,
+                    sourceName=item.sourceName,
+                    rawTitle=item.title,
+                    normalizedTitle=norm_title,
+                    rawOrganization=item.organizationName,
+                    normalizedOrganization=norm_org,
+                    canonicalUrl=canonical_url,
+                    action="skipped_expired",
+                    opportunityId=matched_id,
+                    reason=exp_reason,
+                )
+            )
+            continue
+
         if match.status == "idempotent_source_match" and match.matched_opportunity_id:
             target_opp = next(
                 o for o in existing_opps if o.id == match.matched_opportunity_id
             )
+            details_changed = (
+                target_opp.location != item.location.strip()
+                or target_opp.work_mode != norm_mode
+                or target_opp.role_category != item.roleCategory
+                or target_opp.domain != item.domain
+                or target_opp.title != item.title.strip()
+                or target_opp.description != item.description.strip()
+            )
+            target_opp.title = item.title.strip()
+            target_opp.normalized_title = norm_title
+            target_opp.description = item.description.strip()
+            target_opp.opportunity_type = item.opportunityType
+            target_opp.role_category = item.roleCategory
+            target_opp.domain = item.domain
+            target_opp.location = item.location.strip()
+            target_opp.work_mode = norm_mode
+            target_opp.compensation_min = item.compensationMin
+            target_opp.compensation_max = item.compensationMax or item.compensationMin
+            target_opp.compensation_currency = item.compensationCurrency
+            target_opp.updated_at = now
             target_opp.last_seen_at = now
             for src in sources_by_opp_id.get(target_opp.id, []):
                 if src.external_id.lower() == item.externalId.lower():
                     src.last_checked_at = now
                     src.source_status = "active" if item.httpReachable else "unreachable"
+            matched_org = orgs_by_id.get(target_opp.organization_id)
+            if details_changed and matched_org is not None:
+                _persist_trust_and_analysis(
+                    db, target_opp, matched_org, force_refresh=True, allow_llm=False
+                )
             evaluate_opportunity_freshness(
                 target_opp,
                 sources_by_opp_id.get(target_opp.id, []),
@@ -140,6 +202,27 @@ def run_ingestion_batch(
             target_opp = next(
                 o for o in existing_opps if o.id == match.matched_opportunity_id
             )
+            if item.externalId.startswith(("native_", "worldwide_")):
+                details_changed = (
+                    target_opp.location != item.location.strip()
+                    or target_opp.work_mode != norm_mode
+                    or target_opp.role_category != item.roleCategory
+                    or target_opp.domain != item.domain
+                    or target_opp.title != item.title.strip()
+                )
+                target_opp.title = item.title.strip()
+                target_opp.normalized_title = norm_title
+                target_opp.description = item.description.strip()
+                target_opp.role_category = item.roleCategory
+                target_opp.domain = item.domain
+                target_opp.location = item.location.strip()
+                target_opp.work_mode = norm_mode
+                target_opp.updated_at = now
+                matched_org = orgs_by_id.get(target_opp.organization_id)
+                if details_changed and matched_org is not None:
+                    _persist_trust_and_analysis(
+                        db, target_opp, matched_org, force_refresh=True, allow_llm=False
+                    )
             target_opp.last_seen_at = now
             opp_sources = sources_by_opp_id.setdefault(target_opp.id, [])
             already_linked = any(
@@ -228,7 +311,7 @@ def run_ingestion_batch(
             compensation_currency=item.compensationCurrency,
             compensation_period=item.compensationPeriod,
             duration=item.duration,
-            posted_at=now,
+            posted_at=item.postedAt or now,
             deadline=item.deadline,
             application_url=canonical_url,
             recruiter_contact_email=item.recruiterContactEmail,
@@ -286,6 +369,7 @@ def run_ingestion_batch(
         newOpportunitiesCreated=new_count,
         idempotentUpdates=idempotent_count,
         crossSourceDuplicatesMerged=merged_count,
+        skippedExpired=skipped_expired_count,
         outcomes=outcomes,
     )
 

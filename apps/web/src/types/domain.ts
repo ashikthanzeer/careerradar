@@ -52,7 +52,13 @@ export type EvidenceType =
 
 export type SkillProficiency = 'beginner' | 'intermediate' | 'advanced';
 
-export type SkillSourceType = 'explicit' | 'inferred_from_project';
+export type SkillSourceType =
+  | 'explicit'
+  | 'inferred_from_project'
+  | 'resume'
+  | 'linkedin'
+  | 'portfolio'
+  | 'github';
 
 export type ApplicationStatus =
   | 'interested'
@@ -219,6 +225,56 @@ export interface CareerProfile {
   }[];
   skills: UserSkill[];
   updatedAt: string;
+  onboardingCompleted?: boolean;
+  nativeCountry?: string;
+  portfolioUrl?: string | null;
+  linkedinUrl?: string | null;
+  lastJobFetchAt?: string | null;
+  triggersUsedToday?: number;
+  triggersRemainingToday?: number;
+  maxTriggersPerDay?: number;
+  isStaleForLoginTrigger?: boolean;
+}
+
+export interface ProfileExtractionResult {
+  displayName?: string | null;
+  educationLevel?: 'undergraduate' | 'masters' | 'phd' | 'recent_graduate';
+  fieldOfStudy?: string;
+  institution?: string;
+  graduationYear?: number;
+  preferredRoles: RoleCategory[];
+  preferredDomains: DomainCategory[];
+  linkedinUrl?: string | null;
+  portfolioUrl?: string | null;
+  skills: UserSkill[];
+  projects: CareerProfile['projects'];
+  careerInterestsSummary?: string;
+  extractionNotice: string;
+}
+
+export interface LiveFetchResponse {
+  triggered?: boolean;
+  rateLimited?: boolean;
+  triggerSource?: string;
+  reason?: string;
+  onboardingCompleted?: boolean;
+  lastJobFetchAt?: string | null;
+  triggersUsedToday?: number;
+  triggersRemainingToday?: number;
+  maxTriggersPerDay?: number;
+  isStaleForLoginTrigger?: boolean;
+  query?: string;
+  nativeCountry?: string;
+  nativeCount?: number;
+  worldwideCount?: number;
+  sourcesQueried?: string[];
+  warnings?: string[];
+  report?: {
+    newOpportunitiesCreated: number;
+    crossSourceDuplicatesMerged: number;
+    skippedExpired?: number;
+    totalProcessed: number;
+  };
 }
 
 export interface SkillGapItem {
@@ -300,6 +356,7 @@ export interface OpportunityFilterParams {
   paidOnly?: boolean;
   skill?: string;
   source?: string;
+  region?: 'all' | 'native' | 'worldwide';
   sortBy?: 'relevance' | 'deadline_asc' | 'posted_desc' | 'stipend_desc';
   page?: number;
   pageSize?: number;

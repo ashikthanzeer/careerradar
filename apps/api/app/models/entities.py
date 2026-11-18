@@ -43,6 +43,9 @@ class User(Base):
     applications: Mapped[list["Application"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    fetch_state: Mapped["UserFetchState | None"] = relationship(
+        back_populates="user", uselist=False, cascade="all, delete-orphan"
+    )
 
 
 class CareerProfile(Base):
@@ -296,4 +299,21 @@ class Application(Base):
     updated_at: Mapped[str] = mapped_column(String(40), default=utc_now_iso)
 
     user: Mapped["User"] = relationship(back_populates="applications")
+
+
+class UserFetchState(Base):
+    __tablename__ = "user_fetch_states"
+
+    user_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    onboarding_completed: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_job_fetch_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    fetch_date_utc: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    fetch_count_today: Mapped[int] = mapped_column(Integer, default=0)
+    native_country: Mapped[str] = mapped_column(String(80), default="India")
+    portfolio_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    linkedin_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    user: Mapped["User"] = relationship(back_populates="fetch_state")
 

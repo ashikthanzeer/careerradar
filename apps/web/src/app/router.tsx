@@ -1,4 +1,4 @@
-import { createBrowserRouter, Navigate } from 'react-router-dom';
+import { createBrowserRouter, Navigate, Outlet, useLocation } from 'react-router-dom';
 import { AppShell } from '@/components/layout/AppShell';
 import { LandingPage } from '@/features/landing/LandingPage';
 import { LoginPage } from '@/features/auth/LoginPage';
@@ -10,10 +10,41 @@ import { SavedOpportunitiesPage } from '@/features/saved/SavedOpportunitiesPage'
 import { ApplicationsPage } from '@/features/applications/ApplicationsPage';
 import { ProfilePage } from '@/features/profile/ProfilePage';
 import { SystemsIntelligencePage } from '@/features/systems/SystemsIntelligencePage';
+import { OnboardingPage } from '@/features/onboarding/OnboardingPage';
+import { useAuth } from '@/hooks/useAuth';
+
+function RequireAuth() {
+  const { isAuthenticated } = useAuth();
+  const location = useLocation();
+
+  if (!isAuthenticated) {
+    const redirect = `${location.pathname}${location.search}`;
+    return (
+      <Navigate
+        to={`/login?redirect=${encodeURIComponent(redirect)}`}
+        replace
+      />
+    );
+  }
+
+  return <Outlet />;
+}
+
+function RootEntry() {
+  const { isAuthenticated } = useAuth();
+  if (isAuthenticated) {
+    return <Navigate to="/discover" replace />;
+  }
+  return <LoginPage />;
+}
 
 export const appRoutes = [
   {
     path: '/',
+    element: <RootEntry />,
+  },
+  {
+    path: '/about',
     element: <LandingPage />,
   },
   {
@@ -25,39 +56,48 @@ export const appRoutes = [
     element: <OAuthCallbackPage />,
   },
   {
-    element: <AppShell />,
+    element: <RequireAuth />,
     children: [
       {
-        path: '/dashboard',
-        element: <DashboardPage />,
-      },
-      {
-        path: '/discover',
-        element: <DiscoveryPage />,
-      },
-      {
-        path: '/opportunities/:opportunityId',
-        element: <OpportunityDetailPage />,
-      },
-      {
-        path: '/saved',
-        element: <SavedOpportunitiesPage />,
-      },
-      {
-        path: '/applications',
-        element: <ApplicationsPage />,
-      },
-      {
-        path: '/profile',
-        element: <ProfilePage />,
-      },
-      {
-        path: '/systems',
-        element: <SystemsIntelligencePage />,
-      },
-      {
-        path: '*',
-        element: <Navigate to="/discover" replace />,
+        element: <AppShell />,
+        children: [
+          {
+            path: '/dashboard',
+            element: <DashboardPage />,
+          },
+          {
+            path: '/discover',
+            element: <DiscoveryPage />,
+          },
+          {
+            path: '/opportunities/:opportunityId',
+            element: <OpportunityDetailPage />,
+          },
+          {
+            path: '/saved',
+            element: <SavedOpportunitiesPage />,
+          },
+          {
+            path: '/applications',
+            element: <ApplicationsPage />,
+          },
+          {
+            path: '/profile',
+            element: <ProfilePage />,
+          },
+          {
+            path: '/onboarding',
+            element: <OnboardingPage />,
+          },
+          {
+            path: '/systems',
+            element: <SystemsIntelligencePage />,
+          },
+          {
+            path: '*',
+            element: <Navigate to="/discover" replace />,
+          },
+        ],
       },
     ],
   },

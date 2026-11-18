@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from app.core.auth import AuthenticatedUser, get_current_user
 from app.core.database import get_db
@@ -7,6 +8,7 @@ from app.modules.discovery.service import (
     get_opportunity_for_user,
     list_opportunities_for_user,
 )
+from app.modules.ingestion.url_extractor import extract_job_from_url
 from app.schemas.api_schemas import (
     CreateOpportunityInputSchema,
     EnrichedOpportunitySchema,
@@ -32,9 +34,10 @@ def get_opportunities(
     paidOnly: bool = Query(default=False),
     skill: str | None = Query(default=None),
     source: str | None = Query(default=None),
+    region: str | None = Query(default=None),
     sortBy: str = Query(default="relevance"),
     page: int = Query(default=1, ge=1),
-    pageSize: int = Query(default=6, ge=1, le=100),
+    pageSize: int = Query(default=12, ge=1, le=100),
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> PaginatedResponseSchema[EnrichedOpportunitySchema]:
@@ -50,6 +53,7 @@ def get_opportunities(
         paid_only=paidOnly,
         skill=skill,
         source=source,
+        region=region,
         sort_by=sortBy,
         page=page,
         page_size=pageSize,
@@ -66,6 +70,18 @@ def get_opportunity_detail(
     db: Session = Depends(get_db),
 ) -> EnrichedOpportunitySchema:
     return get_opportunity_for_user(db, current_user.id, opportunity_id)
+
+
+class ExtractJobUrlInputSchema(BaseModel):
+    url: str = Field(min_length=8, max_length=2000)
+
+
+@router.post("/opportunities/extract-url")
+def extract_opportunity_from_url(
+    payload: ExtractJobUrlInputSchema,
+    _current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict:
+    return extract_job_from_url(payload.url)
 
 
 @router.post(

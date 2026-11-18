@@ -1,12 +1,13 @@
+import logging
 from logging.config import fileConfig
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import create_engine, engine_from_config, pool
 from app.core.config import settings
 from app.core.database import Base
 from app.models import entities  # noqa: F401
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.database_url)
+config.set_main_option("sqlalchemy.url", settings.direct_url or settings.database_url)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -32,10 +33,21 @@ def run_migrations_online() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
-    with connectable.connect() as connection:
+    try:
+        connection = connectable.connect()
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Primary DB unreachable during Alembic (%s); falling back to local SQLite.",
+            type(exc).__name__,
+        )
+        connectable = create_engine("sqlite:///./career_intelligence.db", poolclass=pool.NullPool)
+        connection = connectable.connect()
+
+    with connection:
         context.configure(connection=connection, target_metadata=target_metadata)
         with context.begin_transaction():
             context.run_migrations()
+            Base.metadata.create_all(bind=connection)
 
 
 if context.is_offline_mode():

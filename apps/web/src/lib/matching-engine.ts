@@ -7,7 +7,12 @@ import type {
   SkillGapAnalysis,
   SkillGapItem,
 } from '@/types/domain';
-import { ROLE_CATEGORY_LABELS, WORK_MODE_LABELS } from './utils';
+import {
+  ROLE_CATEGORY_LABELS,
+  WORK_MODE_LABELS,
+  formatCleanText,
+  formatLocationWithMode,
+} from './utils';
 
 const LEARNING_SUGGESTIONS: Record<string, string> = {
   pytorch: 'Build and benchmark a small transformer or vision training pipeline with PyTorch & TorchScript.',
@@ -48,7 +53,7 @@ export function analyzeSkillGap(
 
   for (const s of profile.skills) {
     const key = normalizeSkillName(s.canonicalName);
-    if (s.sourceType === 'explicit') {
+    if (s.sourceType !== 'inferred_from_project') {
       explicitMap.set(key, s.canonicalName);
     } else {
       inferredMap.set(key, s.sourceReference ?? 'Profile project');
@@ -111,11 +116,11 @@ export function analyzeSkillGap(
   const requiredCoveragePercent =
     requiredItems.length > 0
       ? Math.round((matchedRequiredCount / requiredItems.length) * 100)
-      : 100;
+      : 0;
 
   const totalMatchedCount = items.filter((i) => i.status !== 'unverified_gap').length;
   const overallCoveragePercent =
-    items.length > 0 ? Math.round((totalMatchedCount / items.length) * 100) : 100;
+    items.length > 0 ? Math.round((totalMatchedCount / items.length) * 100) : 0;
 
   return {
     opportunityId: opportunity.id,
@@ -316,9 +321,11 @@ const KNOWN_TECHNICAL_SKILLS: {
 export function extractStructuredIntelligence(
   opportunity: Opportunity
 ): { skills: OpportunitySkillRequirement[]; analysis: OpportunityAnalysis } {
+  const cleanDescription = formatCleanText(opportunity.description);
+  const cleanTitle = formatCleanText(opportunity.title);
   const skills: OpportunitySkillRequirement[] = [];
   for (const item of KNOWN_TECHNICAL_SKILLS) {
-    if (item.patterns.some((p) => p.test(opportunity.description) || p.test(opportunity.title))) {
+    if (item.patterns.some((p) => p.test(cleanDescription) || p.test(cleanTitle))) {
       skills.push({
         skillName: item.canonical,
         category: item.category,
@@ -328,16 +335,7 @@ export function extractStructuredIntelligence(
     }
   }
 
-  if (skills.length === 0) {
-    skills.push({
-      skillName: 'Git',
-      category: 'tooling',
-      requirementType: 'required',
-      extractionConfidence: 0.7,
-    });
-  }
-
-  const sentences = opportunity.description
+  const sentences = cleanDescription
     .split(/(?<=[.!?])\s+|\n+/)
     .map((s) => s.trim())
     .filter((s) => s.length > 20);
@@ -360,13 +358,14 @@ export function extractStructuredIntelligence(
     .filter((s) => s.requirementType === 'preferred')
     .map((s) => s.skillName);
 
+  const locationSummary = formatLocationWithMode(opportunity.location, opportunity.workMode);
+
   const analysis: OpportunityAnalysis = {
     id: `analysis_${opportunity.id}`,
     opportunityId: opportunity.id,
     analysisType: 'rule_and_schema_validated',
     shortSummary:
-      sentences[0] ??
-      `${opportunity.title} opportunity in ${opportunity.location} (${opportunity.workMode}).`,
+      sentences[0] ?? `${cleanTitle} opportunity in ${locationSummary}.`,
     responsibilities:
       sentences.slice(0, 4).length > 0
         ? sentences.slice(0, 4)
@@ -383,7 +382,7 @@ export function extractStructuredIntelligence(
         ? `${opportunity.compensationCurrency ?? ''} ${opportunity.compensationMin ?? opportunity.compensationMax} (${opportunity.compensationPeriod})`
         : 'Unknown (Not stated in listing)',
     durationSummary: opportunity.duration || 'Unknown duration',
-    locationSummary: `${opportunity.location} (${opportunity.workMode})`,
+    locationSummary,
     applicationDeadlineSummary: opportunity.deadline ?? 'Rolling / Not specified',
     ambiguitiesOrMissingInfo: ambiguities,
     learningValueAssessment: {

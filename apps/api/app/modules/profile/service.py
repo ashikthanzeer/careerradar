@@ -1,6 +1,13 @@
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
-from app.models.entities import CareerProfile, Skill, User, UserSkill, utc_now_iso
+from app.models.entities import (
+    CareerProfile,
+    Opportunity,
+    Skill,
+    User,
+    UserSkill,
+    utc_now_iso,
+)
 from app.schemas.api_schemas import (
     CareerProfileSchema,
     ProfileProjectSchema,
@@ -58,6 +65,9 @@ def get_or_create_profile(db: Session, user_id: str) -> CareerProfileSchema:
     projects_schema = [
         ProfileProjectSchema(**proj) for proj in (profile.projects or [])
     ]
+    from app.modules.ingestion.live_fetcher import get_user_fetch_quota
+
+    quota = get_user_fetch_quota(db, user_id)
 
     return CareerProfileSchema(
         id=profile.id,
@@ -77,11 +87,20 @@ def get_or_create_profile(db: Session, user_id: str) -> CareerProfileSchema:
         projects=projects_schema,
         skills=skills_schema,
         updatedAt=profile.updated_at,
+        onboardingCompleted=quota["onboardingCompleted"],
+        nativeCountry=quota["nativeCountry"],
+        portfolioUrl=quota["portfolioUrl"],
+        linkedinUrl=quota["linkedinUrl"],
+        lastJobFetchAt=quota["lastJobFetchAt"],
+        triggersUsedToday=quota["triggersUsedToday"],
+        triggersRemainingToday=quota["triggersRemainingToday"],
+        maxTriggersPerDay=quota["maxTriggersPerDay"],
+        isStaleForLoginTrigger=quota["isStaleForLoginTrigger"],
     )
 
 
 def update_user_profile(
-    db: Session, user_id: str, payload: CareerProfileSchema
+    db: Session, user_id: str, payload: CareerProfileSchema, auto_fetch: bool = True
 ) -> CareerProfileSchema:
     """
     Updates the authenticated user's CareerProfile and UserSkills.
@@ -137,7 +156,7 @@ def update_user_profile(
 
         db.add(
             UserSkill(
-                id=s.id or f"uskill_{user_id}_{s_idx}",
+                id=f"uskill_{user_id}_{skill_entity.id}",
                 user_id=user_id,
                 skill_id=skill_entity.id,
                 proficiency=s.proficiency,
@@ -147,5 +166,31 @@ def update_user_profile(
             )
         )
 
+    from app.modules.ingestion.live_fetcher import (
+        get_or_init_fetch_state,
+        realign_stored_catalog_to_preferences,
+        trigger_profile_job_fetch_for_user,
+    )
+
+    state = get_or_init_fetch_state(db, user_id)
+    was_onboarded = bool(state.onboarding_completed)
+    existing_opp_count = db.scalar(select(func.count()).select_from(Opportunity)) or 0
+    state.onboarding_completed = True
+    state.native_country = (payload.nativeCountry or "India").strip() or "India"
+    state.portfolio_url = payload.portfolioUrl
+    state.linkedin_url = payload.linkedinUrl
+
     db.commit()
+
+    if auto_fetch:
+        try:
+            if not was_onboarded or existing_opp_count == 0:
+                trigger_profile_job_fetch_for_user(
+                    db, user_id, trigger_source="profile_save", limit=50
+                )
+            else:
+                realign_stored_catalog_to_preferences(db, user_id)
+        except Exception:
+            pass
+
     return get_or_create_profile(db, user_id)

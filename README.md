@@ -6,16 +6,20 @@ CareerRadar is a production-ready career intelligence platform that helps studen
 
 ## Key Capabilities
 
-1. **Sign In with Google**:
-   - Google OAuth 2.0 / OIDC authentication backed by HMAC-SHA256 signed JWT sessions.
+1. **Sign In with Google (Better Auth + Persistent Device Sessions)**:
+   - Entry at `/` opens the Google login interface (`<LoginPage />`) when signed out and automatically redirects signed-in users to **Find & Check Jobs (`/discover`)**.
+   - Better Auth-compatible routes (`/api/auth/sign-in/social`, `/api/auth/callback/google`, `/api/auth/get-session`, `/api/auth/sign-out`) alongside `/api/v1/auth/*` issue 30-day HMAC-SHA256 signed JWTs stored in both `better-auth.session_token` cookies and device `localStorage`, keeping users signed in across browser refreshes and server restarts.
    - Every user starts with a clean, private workspace (zero pre-filled dummy jobs or fake profiles) with full JSON data export and one-click account deletion.
-2. **Instant Job Safety & Scam Check**:
+2. **Job Link Auto-Fetch & Live Public Job Board Sync**:
+   - Paste a job URL from LinkedIn, Internshala, Indeed, Greenhouse, Lever, Ashby, or a company careers page (`POST /api/v1/opportunities/extract-url`) to extract Schema.org JSON-LD `JobPosting`, platform DOM/OpenGraph tags, and URL-slug metadata fallbacks when boards are auth-walled.
+   - Sync real remote/tech job listings on demand from public Remotive and Arbeitnow feeds (`POST /api/v1/ingestion/fetch-live`) into your safety & skill-match pipeline.
+3. **Instant Job Safety & Scam Check**:
    - Evaluates job postings for upfront registration/training fees (`FEE_REQUIRED`), sensitive credential requests (`CREDENTIAL_HARVESTING`), brand impersonation from free email domains (`BRAND_IMPERSONATION_RISK`), external Google Forms/Telegram links, and adversarial prompt-injection attempts.
-3. **Clear Skill-Match & Gap Analysis**:
+4. **Clear Skill-Match & Gap Analysis**:
    - Compares job requirements against your explicitly listed skills and project experience, showing which skills you already have and which skills to brush up on.
-4. **End-to-End Application Tracker**:
+5. **End-to-End Application Tracker**:
    - Bookmark jobs, track applications from *Interested* and *Applied* through *Assessment*, *Interview*, and *Offer*, monitor upcoming deadlines, and record private notes.
-5. **Compliant Ingestion, Deduplication & Hybrid Semantic Search**:
+6. **Compliant Ingestion, Deduplication & Hybrid Semantic Search**:
    - Normalizes organization names and URLs, merges cross-source duplicates without losing provenance, and supports hybrid lexical + semantic concept retrieval.
 
 ---
@@ -52,17 +56,23 @@ careerintelligence/
 
 ### Step 1: Configure Environment Variables
 
-Copy `.env.example` to `.env` in the repository root (and/or inside `apps/api/.env`):
+Copy `.env.example` to `.env` in the repository root (`apps/api` automatically loads the repository-root `.env` as well as `apps/api/.env` if present):
 
 ```bash
 cp .env.example .env
-cp .env.example apps/api/.env
 ```
 
-To enable live redirects to Google OAuth 2.0 sign-in, add your Google OAuth client credentials in `apps/api/.env`:
-- `GOOGLE_CLIENT_ID` & `GOOGLE_CLIENT_SECRET` (Redirect URI: `http://localhost:5173/auth/callback?provider=google`)
+To enable live redirects to Google OAuth 2.0 sign-in, add your Google OAuth client credentials in `.env`. See [`.env.example`](./.env.example) for the deployment segregation between Frontend (`apps/web`) and Backend (`apps/api`) environment variables:
 
-*(Note: When running locally before Google OAuth client secrets are configured, clicking **Continue with Google** on `/login` automatically provides a direct Google identity sign-in step so you can sign in and use the full platform immediately.)*
+- **Frontend (`apps/web` — static host / Vercel / Netlify)**:
+  - `VITE_API_BASE_URL` (and optional `VITE_DATA_MODE`) — never put secret API keys in `VITE_*` variables.
+- **Backend (`apps/api` — FastAPI server host)**:
+  - Database: `DATABASE_URL`, `DIRECT_URL` (PostgreSQL/Neon or local SQLite fallback)
+  - Runtime & CORS: `ENVIRONMENT`, `FRONTEND_URL`, `ALLOWED_ORIGINS`
+  - Auth & OAuth: `JWT_SECRET_KEY`, `JWT_EXPIRE_MINUTES`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`
+  - AI Extraction (Groq — server-side only): `GROQ_API_KEY`, `GROQ_MODEL`, `GROQ_API_BASE_URL`
+
+*(Note: When running locally without `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`, clicking **Continue with Google** provides a direct local identity sign-in step so you can still test all platform features. Also, if `DATABASE_URL` points to PostgreSQL without `psycopg`/`psycopg2` installed in `.venv`, `apps/api` automatically logs a warning and uses persistent local SQLite `sqlite:///./career_intelligence.db`.)*
 
 ---
 
@@ -104,10 +114,10 @@ npm install
 npm run dev
 ```
 
-Open **`http://localhost:5173`** in your browser:
-1. Click **Sign In** and choose **Continue with Google**.
+Open **`http://localhost:5173`** in your browser (unauthenticated visitors land directly on the Google login interface at `/`; signed-in users are automatically taken to `/discover` and stay signed in across browser refreshes):
+1. Click **Continue with Google** to sign in and persist your 30-day session on the device.
 2. Visit **My Skills & Profile (`/profile`)** to add your skills and education.
-3. Visit **Find & Check Jobs (`/discover`)** and click **Check / Add a Job Listing** to paste any job post and inspect its safety and skill-match breakdown.
+3. Visit **Find & Check Jobs (`/discover`)** to paste any LinkedIn, Internshala, Indeed, Greenhouse, Lever, Ashby, or company job URL to auto-fetch details, click **Fetch Live Jobs** to sync public Remotive/Arbeitnow roles, or open **Check / Add a Job Listing** to inspect scam indicators and your skill-match breakdown.
 
 ---
 
@@ -122,13 +132,13 @@ bash scripts/verify.sh
 Or run them individually:
 
 ```bash
-# Frontend checks (TypeScript + 11 Vitest unit/journey tests + Vite production build)
+# Frontend checks (TypeScript + 14 Vitest unit/journey tests across 3 files + Vite production build)
 cd apps/web
 npm run typecheck
 npm test
 npm run build
 
-# Backend checks (Alembic migrations + 10 Pytest API, OAuth, ownership & security tests)
+# Backend checks (Alembic migrations + 16 Pytest API, Better Auth, URL extractor, ownership & security tests across 5 files)
 cd ../api
 .venv/bin/alembic upgrade head
 .venv/bin/pytest -v

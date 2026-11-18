@@ -2,6 +2,7 @@ import { localStore } from '@/lib/storage';
 
 export const API_CONFIG = {
   baseUrl: import.meta.env.VITE_API_BASE_URL || '/api/v1',
+  authBaseUrl: (import.meta.env.VITE_API_BASE_URL || '/api/v1').replace(/\/v1\/?$/, '') + '/auth',
   dataMode: (import.meta.env.VITE_DATA_MODE || 'hybrid') as 'mock' | 'api' | 'hybrid',
 };
 
@@ -19,14 +20,17 @@ export class ApiClientError extends Error {
 
 export async function apiRequest<T>(
   endpoint: string,
-  options?: RequestInit
+  options?: RequestInit,
+  customBaseUrl?: string
 ): Promise<T> {
   const session = localStore.getAuthSession();
   const authHeader: Record<string, string> = session?.accessToken
     ? { Authorization: `Bearer ${session.accessToken}` }
     : {};
 
-  const response = await fetch(`${API_CONFIG.baseUrl}${endpoint}`, {
+  const targetBase = customBaseUrl ?? API_CONFIG.baseUrl;
+  const response = await fetch(`${targetBase}${endpoint}`, {
+    credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
       ...authHeader,
