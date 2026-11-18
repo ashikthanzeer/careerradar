@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useAuth } from '@/hooks/useAuth';
+import { OAUTH_POST_LOGIN_REDIRECT_KEY } from '@/lib/auth-client';
 import { LoadingState, ErrorState } from '@/components/ui/StateFeedback';
 import type { OAuthProviderId } from '@/services/auth.service';
 
 export function OAuthCallbackPage() {
   const [searchParams] = useSearchParams();
+  const { provider: providerParam } = useParams<{ provider?: string }>();
   const navigate = useNavigate();
   const { signInWithProvider } = useAuth();
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -17,12 +19,19 @@ export function OAuthCallbackPage() {
     processedRef.current = true;
 
     const oauthError = searchParams.get('error');
+    const errorDescription = searchParams.get('error_description');
     if (oauthError) {
-      setErrorMessage(`Google sign-in was cancelled or denied (${oauthError}).`);
+      const details = errorDescription ? `: ${errorDescription}` : '';
+      setErrorMessage(`Google sign-in was cancelled or denied (${oauthError}${details}).`);
       return;
     }
 
-    const provider = (searchParams.get('provider') || 'google') as OAuthProviderId;
+    const rawProvider = (providerParam || searchParams.get('provider') || 'google').toLowerCase();
+    if (rawProvider !== 'google') {
+      setErrorMessage(`Unsupported OAuth provider (${rawProvider}). Only Google sign-in is enabled.`);
+      return;
+    }
+    const provider: OAuthProviderId = 'google';
     const code = searchParams.get('code') || undefined;
     const state = searchParams.get('state') || undefined;
 
@@ -31,9 +40,23 @@ export function OAuthCallbackPage() {
       return;
     }
 
+    if (!state) {
+      setErrorMessage('Missing OAuth security state parameter. Please try signing in again.');
+      return;
+    }
+
+    let postLoginRedirect = '/discover';
+    if (typeof window !== 'undefined') {
+      const saved = window.localStorage.getItem(OAUTH_POST_LOGIN_REDIRECT_KEY);
+      if (saved && saved.startsWith('/') && !saved.startsWith('//') && saved !== '/login') {
+        postLoginRedirect = saved;
+      }
+      window.localStorage.removeItem(OAUTH_POST_LOGIN_REDIRECT_KEY);
+    }
+
     signInWithProvider({ provider, code, state })
       .then((created) => {
-        navigate(created.onboardingRequired ? '/onboarding' : '/discover', {
+        navigate(created.onboardingRequired ? '/onboarding' : postLoginRedirect, {
           replace: true,
         });
       })
@@ -44,7 +67,7 @@ export function OAuthCallbackPage() {
             : 'Failed to complete Google sign-in.'
         );
       });
-  }, [searchParams, signInWithProvider, navigate]);
+  }, [searchParams, providerParam, signInWithProvider, navigate]);
 
   if (errorMessage) {
     return (

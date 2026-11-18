@@ -30,9 +30,12 @@ app = FastAPI(
 )
 
 origins = [o.strip() for o in settings.allowed_origins.split(",") if o.strip()]
+if "https://careerradar-web.vercel.app" not in origins:
+    origins.append("https://careerradar-web.vercel.app")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins or ["*"],
+    allow_origin_regex=r"^https://.*careerradar.*\.vercel\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

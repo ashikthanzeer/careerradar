@@ -211,3 +211,120 @@ def test_extract_url_endpoint_with_indeed_dom_html(
     assert "SQL, Python, pandas" in data["description"]
     assert data["partialExtraction"] is False
 
+
+def test_google_oauth_callback_csrf_state_validation_and_vercel_redirect_uri(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """
+    Verifies Tasks 5–10 of the Google OAuth production callback flow:
+    - Accepts trusted Vercel callback URL (https://careerradar-web.vercel.app/auth/callback)
+      and binds it into the HMAC-SHA256 signed OAuth state token.
+    - Rejects missing or tampered state parameters on code callback (CSRF prevention).
+    - Exchanges authorization code securely with Google on the backend using client_secret
+      and the exact matching redirect_uri, then establishes a session cookie + JWT.
+    - Redirects gracefully when Google returns an error on the GET callback route.
+    """
+    vercel_cb = "https://careerradar-web.vercel.app/auth/callback"
+
+    social_res = client.post(
+        "/api/auth/sign-in/social",
+        json={"provider": "google", "callbackURL": "/discover", "redirectUri": vercel_cb},
+    )
+    assert social_res.status_code == 200
+    social_data = social_res.json()
+    assert social_data["redirectUri"] == vercel_cb
+    assert "redirect_uri=https%3A%2F%2Fcareerradar-web.vercel.app%2Fauth%2Fcallback" in (
+        social_data["url"] or ""
+    )
+
+    auth_res = client.get(
+        "/api/v1/auth/oauth/google/authorize",
+        params={"redirect_uri": vercel_cb},
+    )
+    assert auth_res.status_code == 200
+    signed_state = auth_res.json()["state"]
+    assert "redirect_uri=https%3A%2F%2Fcareerradar-web.vercel.app%2Fauth%2Fcallback" in (
+        auth_res.json()["authorizationUrl"] or ""
+    )
+
+    # CSRF protection: missing or tampered state MUST fail with 400
+    missing_state_res = client.post(
+        "/api/v1/auth/oauth/google/callback",
+        json={"code": "fake_google_code", "redirectUri": vercel_cb},
+    )
+    assert missing_state_res.status_code == 400
+
+    tampered_state_res = client.post(
+        "/api/v1/auth/oauth/google/callback",
+        json={
+            "code": "fake_google_code",
+            "state": "tampered.jwt.token",
+            "redirectUri": vercel_cb,
+        },
+    )
+    assert tampered_state_res.status_code == 400
+
+    # Mock Google token exchange + userinfo endpoint
+    orig_post = httpx.Client.post
+    orig_get = httpx.Client.get
+    captured_token_form: dict[str, Any] = {}
+
+    class _FakeResp:
+        def __init__(self, status_code: int, payload: dict[str, Any]) -> None:
+            self.status_code = status_code
+            self._payload = payload
+            self.text = json.dumps(payload)
+
+        def json(self) -> dict[str, Any]:
+            return self._payload
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                raise RuntimeError("HTTP error")
+
+    def _fake_post(self: httpx.Client, url: str, **kwargs: Any) -> Any:
+        if "oauth2.googleapis.com/token" in str(url):
+            captured_token_form.update(kwargs.get("data") or {})
+            return _FakeResp(200, {"access_token": "google_access_tok_123"})
+        return orig_post(self, url, **kwargs)
+
+    def _fake_get(self: httpx.Client, url: str, **kwargs: Any) -> Any:
+        if "googleapis.com/oauth2/v3/userinfo" in str(url):
+            return _FakeResp(
+                200,
+                {
+                    "email": "vercel.oauth@gmail.com",
+                    "name": "Vercel OAuth User",
+                    "sub": "google_sub_999",
+                    "picture": "https://lh3.googleusercontent.com/avatar.png",
+                },
+            )
+        return orig_get(self, url, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "post", _fake_post)
+    monkeypatch.setattr(httpx.Client, "get", _fake_get)
+
+    cb_res = client.post(
+        "/api/v1/auth/oauth/google/callback",
+        json={
+            "code": "valid_google_code_vercel",
+            "state": signed_state,
+            "redirectUri": vercel_cb,
+        },
+    )
+    assert cb_res.status_code == 200
+    cb_data = cb_res.json()
+    assert cb_data["user"]["email"] == "vercel.oauth@gmail.com"
+    assert "better-auth.session_token" in cb_res.cookies
+    assert captured_token_form["redirect_uri"] == vercel_cb
+    assert captured_token_form["client_secret"] == settings.google_client_secret
+
+    # GET callback error redirect handled gracefully without 500 or raw exception
+    err_redirect = client.get(
+        "/api/v1/auth/oauth/google/callback",
+        params={"error": "access_denied"},
+        follow_redirects=False,
+    )
+    assert err_redirect.status_code == 302
+    assert "/auth/callback?error=access_denied" in err_redirect.headers["location"]
+

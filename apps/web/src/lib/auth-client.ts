@@ -5,11 +5,50 @@ export interface BetterAuthSocialResult {
   redirect: boolean;
   configuredClientCredentials: boolean;
   url: string | null;
+  redirectUri?: string | null;
   state: string;
 }
 
 const BETTER_AUTH_TOKEN_KEY = 'better-auth.session_token';
 const OAUTH_STATE_KEY = 'careerradar_oauth_state';
+const OAUTH_REDIRECT_URI_KEY = 'careerradar_oauth_redirect_uri';
+export const OAUTH_POST_LOGIN_REDIRECT_KEY = 'careerradar_post_login_redirect';
+
+function getDefaultOAuthCallbackUrl(): string | undefined {
+  if (typeof window === 'undefined' || !window.location?.origin) return undefined;
+  return `${window.location.origin}/auth/callback`;
+}
+
+function storePendingOAuthState(
+  state: string | undefined,
+  redirectUri: string | undefined,
+  callbackURL: string | undefined
+): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (state) {
+      window.localStorage.setItem(OAUTH_STATE_KEY, state);
+    }
+    if (redirectUri) {
+      window.localStorage.setItem(OAUTH_REDIRECT_URI_KEY, redirectUri);
+    }
+    if (callbackURL) {
+      window.localStorage.setItem(OAUTH_POST_LOGIN_REDIRECT_KEY, callbackURL);
+    }
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+function clearPendingOAuthState(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(OAUTH_STATE_KEY);
+    window.localStorage.removeItem(OAUTH_REDIRECT_URI_KEY);
+  } catch {
+    // ignore storage errors
+  }
+}
 
 function persistSessionLocally(session: StoredAuthSession | null): void {
   localStore.saveAuthSession(session);
@@ -34,7 +73,9 @@ export const authClient = {
     async social(params: {
       provider: 'google';
       callbackURL?: string;
+      redirectUri?: string;
     }): Promise<BetterAuthSocialResult> {
+      const redirectUri = params.redirectUri ?? getDefaultOAuthCallbackUrl();
       if (API_CONFIG.dataMode !== 'mock') {
         try {
           const res = await apiRequest<BetterAuthSocialResult>(
@@ -44,30 +85,40 @@ export const authClient = {
               body: JSON.stringify({
                 provider: params.provider,
                 callbackURL: params.callbackURL ?? '/discover',
+                redirectUri,
               }),
             },
             API_CONFIG.authBaseUrl
           );
-          if (typeof window !== 'undefined' && res.state) {
-            window.localStorage.setItem(OAUTH_STATE_KEY, res.state);
-          }
+          storePendingOAuthState(
+            res.state,
+            res.redirectUri ?? redirectUri,
+            params.callbackURL ?? '/discover'
+          );
           return res;
         } catch {
           // Fallback to /api/v1/auth/oauth/google/authorize or offline mode
           try {
+            const query = redirectUri
+              ? `?redirect_uri=${encodeURIComponent(redirectUri)}`
+              : '';
             const authInfo = await apiRequest<{
               provider: 'google';
               configuredClientCredentials: boolean;
               authorizationUrl: string | null;
+              redirectUri?: string | null;
               state: string;
-            }>(`/auth/oauth/${params.provider}/authorize`);
-            if (typeof window !== 'undefined' && authInfo.state) {
-              window.localStorage.setItem(OAUTH_STATE_KEY, authInfo.state);
-            }
+            }>(`/auth/oauth/${params.provider}/authorize${query}`);
+            storePendingOAuthState(
+              authInfo.state,
+              authInfo.redirectUri ?? redirectUri,
+              params.callbackURL ?? '/discover'
+            );
             return {
               redirect: Boolean(authInfo.authorizationUrl),
               configuredClientCredentials: authInfo.configuredClientCredentials,
               url: authInfo.authorizationUrl,
+              redirectUri: authInfo.redirectUri ?? redirectUri,
               state: authInfo.state,
             };
           } catch {
@@ -76,11 +127,14 @@ export const authClient = {
         }
       }
 
+      const fallbackState = `local_state_${params.provider}_${Date.now()}`;
+      storePendingOAuthState(fallbackState, redirectUri, params.callbackURL ?? '/discover');
       return {
         redirect: false,
         configuredClientCredentials: false,
         url: null,
-        state: `local_state_${params.provider}_${Date.now()}`,
+        redirectUri,
+        state: fallbackState,
       };
     },
   },
@@ -91,7 +145,27 @@ export const authClient = {
     state?: string;
     email?: string;
     displayName?: string;
+    redirectUri?: string;
   }): Promise<StoredAuthSession> {
+    if (params.code) {
+      if (!params.state || !params.state.trim()) {
+        throw new Error('Missing OAuth state parameter. Please try signing in again.');
+      }
+      if (typeof window !== 'undefined') {
+        const expectedState = window.localStorage.getItem(OAUTH_STATE_KEY);
+        if (expectedState && expectedState !== params.state) {
+          throw new Error('OAuth state mismatch (CSRF protection). Please start sign-in again.');
+        }
+      }
+    }
+
+    const storedRedirectUri =
+      typeof window !== 'undefined'
+        ? window.localStorage.getItem(OAUTH_REDIRECT_URI_KEY) || undefined
+        : undefined;
+    const effectiveRedirectUri =
+      params.redirectUri ?? storedRedirectUri ?? getDefaultOAuthCallbackUrl();
+
     if (API_CONFIG.dataMode !== 'mock') {
       try {
         const res = await apiRequest<{
@@ -106,6 +180,7 @@ export const authClient = {
             state: params.state,
             email: params.email,
             displayName: params.displayName,
+            redirectUri: effectiveRedirectUri,
           }),
         });
         const session: StoredAuthSession = {
@@ -115,6 +190,7 @@ export const authClient = {
           staleLoginFetchTriggered: res.staleLoginFetchTriggered,
         };
         persistSessionLocally(session);
+        clearPendingOAuthState();
         return session;
       } catch (err) {
         if (params.code) throw err;

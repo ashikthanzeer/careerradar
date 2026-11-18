@@ -56,6 +56,14 @@ export const appRoutes = [
     element: <OAuthCallbackPage />,
   },
   {
+    path: '/auth/callback/:provider',
+    element: <OAuthCallbackPage />,
+  },
+  {
+    path: '/api/auth/callback/:provider',
+    element: <OAuthCallbackPage />,
+  },
+  {
     element: <RequireAuth />,
     children: [
       {

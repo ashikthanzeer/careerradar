@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
@@ -398,5 +398,82 @@ describe('Production Audit: Zero Dummy Data, OAuth Login, Scam Protection & UI J
     expect(fetchSpy).not.toHaveBeenCalled();
 
     fetchSpy.mockRestore();
+  });
+
+  it('TC-09: handles /auth/callback OAuth code exchange, validates CSRF state, and handles errors gracefully', async () => {
+    // 1. Google error parameter renders clean Sign-In Error state with link back to /login
+    renderWithRouter('/auth/callback?error=access_denied&error_description=User%20cancelled');
+    await waitFor(() => {
+      expect(screen.getByText('Sign-In Error')).toBeInTheDocument();
+      expect(screen.getByText(/access_denied: User cancelled/i)).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: /Return to Sign In/i })).toHaveAttribute(
+        'href',
+        '/login'
+      );
+    });
+
+    // 2. CSRF state mismatch is rejected on the frontend before calling backend
+    cleanup();
+    localStore.resetAllToDefaults();
+    window.localStorage.setItem('careerradar_oauth_state', 'signed_expected_state');
+    renderWithRouter('/auth/callback?code=auth_code_123&state=tampered_state');
+    await waitFor(() => {
+      expect(screen.getByText('Sign-In Error')).toBeInTheDocument();
+      expect(screen.getByText(/OAuth state mismatch/i)).toBeInTheDocument();
+    });
+
+    // 3. Valid code + matching state exchanges token via backend API and redirects to requested route
+    cleanup();
+    localStore.resetAllToDefaults();
+    API_CONFIG.dataMode = 'api';
+    window.localStorage.setItem('careerradar_oauth_state', 'signed_expected_state');
+    window.localStorage.setItem('careerradar_post_login_redirect', '/dashboard');
+
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const targetUrl = typeof input === 'string' ? input : input.toString();
+      if (targetUrl.includes('/auth/oauth/google/callback')) {
+        return new Response(
+          JSON.stringify({
+            accessToken: 'jwt_oauth_verified_123',
+            tokenType: 'bearer',
+            onboardingRequired: false,
+            user: {
+              id: 'usr_google_1',
+              email: 'priya@gmail.com',
+              displayName: 'Priya Nair',
+              provider: 'google',
+              createdAt: '2026-11-18T10:00:00Z',
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (targetUrl.includes('/get-session')) {
+        return new Response(JSON.stringify({ session: null, user: null }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (targetUrl.includes('/opportunities')) {
+        return new Response(
+          JSON.stringify({ items: [], total: 0, page: 1, pageSize: 12, totalPages: 1 }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    renderWithRouter('/auth/callback?code=auth_code_123&state=signed_expected_state');
+    await waitFor(() => {
+      expect(localStore.getAuthSession()?.accessToken).toBe('jwt_oauth_verified_123');
+      expect(screen.queryByText(/Completing secure Google sign-in/i)).not.toBeInTheDocument();
+    });
+    expect(window.localStorage.getItem('careerradar_oauth_state')).toBeNull();
+
+    API_CONFIG.dataMode = 'mock';
+    fetchMock.mockRestore();
   });
 });

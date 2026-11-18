@@ -1,6 +1,6 @@
 import hashlib
 from typing import Any, Literal
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import RedirectResponse
@@ -17,7 +17,7 @@ from app.core.auth import (
     mark_user_deleted,
     resolve_user_from_token,
     unmark_user_deleted,
-    verify_access_token,
+    verify_oauth_state,
 )
 from app.core.config import settings
 from app.core.database import get_db
@@ -68,6 +68,7 @@ class OAuthAuthorizeResponseSchema(BaseModel):
     provider: OAuthProvider
     configuredClientCredentials: bool
     authorizationUrl: str | None
+    redirectUri: str | None = None
     state: str
 
 
@@ -83,15 +84,70 @@ class OAuthCallbackInputSchema(BaseModel):
 class SocialSignInInputSchema(BaseModel):
     provider: OAuthProvider = "google"
     callbackURL: str | None = "/discover"
+    redirectUri: str | None = None
+
+
+def _trusted_frontend_hosts() -> set[str]:
+    hosts = {"localhost", "127.0.0.1", "careerradar-web.vercel.app"}
+    for raw in [settings.frontend_url, *settings.allowed_origins.split(",")]:
+        cleaned = raw.strip()
+        if not cleaned:
+            continue
+        parsed = urlparse(cleaned)
+        if parsed.hostname:
+            hosts.add(parsed.hostname.lower())
+    return hosts
+
+
+def _is_trusted_callback_url(raw_url: str | None) -> bool:
+    if not raw_url or not raw_url.strip():
+        return False
+    parsed = urlparse(raw_url.strip())
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+    is_valid_scheme_host = (
+        parsed.scheme == "http" and host in {"localhost", "127.0.0.1"}
+    ) or (
+        parsed.scheme == "https"
+        and (
+            host in _trusted_frontend_hosts()
+            or (host.endswith(".vercel.app") and "careerradar" in host)
+        )
+    )
+    if not is_valid_scheme_host:
+        return False
+    return parsed.path.startswith(
+        ("/auth/callback", "/api/auth/callback", "/api/v1/auth/oauth/")
+    )
+
+
+def _resolve_oauth_redirect_uri(requested_redirect_uri: str | None = None) -> str:
+    if requested_redirect_uri and _is_trusted_callback_url(requested_redirect_uri):
+        return requested_redirect_uri.strip()
+    return settings.google_redirect_uri
+
+
+def _resolve_frontend_origin(redirect_uri: str | None = None) -> str:
+    if redirect_uri and _is_trusted_callback_url(redirect_uri):
+        parsed = urlparse(redirect_uri.strip())
+        if parsed.scheme and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+    return settings.frontend_url.rstrip("/")
 
 
 def _set_session_cookie(response: Response, token: str) -> None:
+    is_https_prod = (
+        settings.environment.lower() == "production"
+        and settings.frontend_url.lower().startswith("https://")
+    )
     response.set_cookie(
         key=BETTER_AUTH_COOKIE_NAME,
         value=token,
         max_age=settings.jwt_expire_minutes * 60,
         httponly=True,
-        samesite="lax",
+        secure=is_https_prod,
+        samesite="none" if is_https_prod else "lax",
         path="/",
     )
 
@@ -295,21 +351,100 @@ def get_oauth_authorize_url(
     provider: OAuthProvider,
     redirect_uri: str | None = Query(default=None),
 ) -> OAuthAuthorizeResponseSchema:
-    state = create_oauth_state(provider)
+    effective_redirect = _resolve_oauth_redirect_uri(redirect_uri)
+    state = create_oauth_state(provider, redirect_uri=effective_redirect)
 
     if not settings.google_client_id or not settings.google_client_secret:
         return OAuthAuthorizeResponseSchema(
             provider="google",
             configuredClientCredentials=False,
             authorizationUrl=None,
+            redirectUri=effective_redirect,
             state=state,
         )
     return OAuthAuthorizeResponseSchema(
         provider="google",
         configuredClientCredentials=True,
-        authorizationUrl=_build_google_authorize_url(state, redirect_uri=redirect_uri),
+        authorizationUrl=_build_google_authorize_url(state, redirect_uri=effective_redirect),
+        redirectUri=effective_redirect,
         state=state,
     )
+
+
+def _complete_google_redirect_callback(
+    db: Session,
+    code: str | None,
+    state: str | None,
+    error: str | None,
+) -> RedirectResponse:
+    default_frontend = settings.frontend_url.rstrip("/")
+    if error:
+        return RedirectResponse(
+            url=f"{default_frontend}/auth/callback?{urlencode({'error': error})}",
+            status_code=302,
+        )
+
+    try:
+        state_claims = verify_oauth_state(state, "google")
+    except HTTPException:
+        return RedirectResponse(
+            url=f"{default_frontend}/auth/callback?error=invalid_state",
+            status_code=302,
+        )
+
+    redirect_in_state = state_claims.get("redirect_uri")
+    target_frontend = _resolve_frontend_origin(
+        str(redirect_in_state) if redirect_in_state else None
+    )
+
+    if not code or not code.strip():
+        return RedirectResponse(
+            url=f"{target_frontend}/auth/callback?error=missing_code",
+            status_code=302,
+        )
+
+    try:
+        if code in _EXCHANGED_CODES:
+            session_res = _EXCHANGED_CODES[code]
+        else:
+            effective_redirect = str(redirect_in_state or settings.google_redirect_uri)
+            email, display_name, account_id, avatar_url = (
+                _exchange_google_code_for_profile(code, redirect_uri=effective_redirect)
+            )
+            dummy_response = Response()
+            session_res = _issue_session_response(
+                db=db,
+                response=dummy_response,
+                provider="google",
+                email=email,
+                display_name=display_name,
+                account_id=account_id,
+                avatar_url=avatar_url,
+            )
+            _EXCHANGED_CODES[code] = session_res
+    except HTTPException:
+        return RedirectResponse(
+            url=f"{target_frontend}/auth/callback?error=token_exchange_failed",
+            status_code=302,
+        )
+
+    target_path = "/onboarding" if session_res.onboardingRequired else "/discover"
+    redirect_res = RedirectResponse(url=f"{target_frontend}{target_path}", status_code=302)
+    _set_session_cookie(redirect_res, session_res.accessToken)
+    return redirect_res
+
+
+@router.get("/oauth/{provider}/callback")
+def get_oauth_callback_redirect(
+    provider: OAuthProvider,
+    code: str | None = Query(default=None),
+    state: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    if provider != "google":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported provider.")
+    return _complete_google_redirect_callback(db=db, code=code, state=state, error=error)
 
 
 @router.post(
@@ -322,27 +457,27 @@ def complete_oauth_callback(
     response: Response,
     db: Session = Depends(get_db),
 ) -> AuthSessionResponseSchema:
+    state_claims: dict[str, Any] | None = None
+    if payload.code or payload.state:
+        state_claims = verify_oauth_state(payload.state, provider)
+
     if payload.code and payload.code in _EXCHANGED_CODES:
         cached = _EXCHANGED_CODES[payload.code]
         _set_session_cookie(response, cached.accessToken)
         return cached
-
-    if payload.state:
-        state_claims = verify_access_token(payload.state)
-        if state_claims.get("provider") != provider:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="OAuth state provider mismatch.",
-            )
 
     provider_configured = bool(
         settings.google_client_id and settings.google_client_secret
     )
 
     if payload.code and provider_configured:
+        effective_redirect = str(
+            (state_claims or {}).get("redirect_uri")
+            or _resolve_oauth_redirect_uri(payload.redirectUri)
+        )
         email, display_name, account_id, avatar_url = (
             _exchange_google_code_for_profile(
-                payload.code, redirect_uri=payload.redirectUri
+                payload.code, redirect_uri=effective_redirect
             )
         )
     elif payload.email:
@@ -354,6 +489,11 @@ def complete_oauth_callback(
         )
         account_id = f"{provider}_{email}"
         avatar_url = payload.avatarUrl
+    elif payload.code and not provider_configured:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google OAuth client credentials are not configured on the backend.",
+        )
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -440,61 +580,35 @@ def delete_user_account(
 def better_auth_social_sign_in(
     payload: SocialSignInInputSchema,
 ) -> dict[str, Any]:
-    state = create_oauth_state(payload.provider)
+    effective_redirect = _resolve_oauth_redirect_uri(payload.redirectUri)
+    state = create_oauth_state(payload.provider, redirect_uri=effective_redirect)
     configured = bool(settings.google_client_id and settings.google_client_secret)
     if not configured:
         return {
             "redirect": False,
             "configuredClientCredentials": False,
             "url": None,
+            "redirectUri": effective_redirect,
             "state": state,
         }
-    auth_url = _build_google_authorize_url(state)
+    auth_url = _build_google_authorize_url(state, redirect_uri=effective_redirect)
     return {
         "redirect": True,
         "configuredClientCredentials": True,
         "url": auth_url,
+        "redirectUri": effective_redirect,
         "state": state,
     }
 
 
 @better_auth_router.get("/callback/google")
 def better_auth_google_callback(
-    code: str = Query(...),
+    code: str | None = Query(default=None),
     state: str | None = Query(default=None),
+    error: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> RedirectResponse:
-    if state:
-        state_claims = verify_access_token(state)
-        if state_claims.get("provider") != "google":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="OAuth state provider mismatch.",
-            )
-
-    if code in _EXCHANGED_CODES:
-        session_res = _EXCHANGED_CODES[code]
-    else:
-        email, display_name, account_id, avatar_url = (
-            _exchange_google_code_for_profile(code)
-        )
-        dummy_response = Response()
-        session_res = _issue_session_response(
-            db=db,
-            response=dummy_response,
-            provider="google",
-            email=email,
-            display_name=display_name,
-            account_id=account_id,
-            avatar_url=avatar_url,
-        )
-        _EXCHANGED_CODES[code] = session_res
-
-    target_path = "/onboarding" if session_res.onboardingRequired else "/discover"
-    redirect_target = f"{settings.frontend_url.rstrip('/')}{target_path}"
-    redirect_res = RedirectResponse(url=redirect_target, status_code=302)
-    _set_session_cookie(redirect_res, session_res.accessToken)
-    return redirect_res
+    return _complete_google_redirect_callback(db=db, code=code, state=state, error=error)
 
 
 @better_auth_router.get("/get-session")

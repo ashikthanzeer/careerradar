@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./career_intelligence.db"
     direct_url: str = ""
     frontend_url: str = "http://localhost:5173"
-    allowed_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    allowed_origins: str = "http://localhost:5173,http://127.0.0.1:5173,https://careerradar-web.vercel.app"
 
     # JWT Security & Persistent Device Session (30 days)
     jwt_secret_key: str = "careerradar-production-hmac-sha256-secret-key-2026"

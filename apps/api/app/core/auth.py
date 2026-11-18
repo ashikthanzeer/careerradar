@@ -2,6 +2,7 @@ import base64
 import hashlib
 import hmac
 import json
+import secrets
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -44,6 +45,21 @@ def _b64url_decode(encoded: str) -> bytes:
     return base64.urlsafe_b64decode(encoded + padding)
 
 
+def _sign_jwt_payload(payload: dict[str, Any]) -> str:
+    header = {"alg": "HS256", "typ": "JWT"}
+    header_b64 = _b64url_encode(json.dumps(header, separators=(",", ":")).encode("utf-8"))
+    payload_b64 = _b64url_encode(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    )
+    signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
+    signature = hmac.new(
+        settings.jwt_secret_key.encode("utf-8"),
+        signing_input,
+        hashlib.sha256,
+    ).digest()
+    return f"{header_b64}.{payload_b64}.{_b64url_encode(signature)}"
+
+
 def create_access_token(
     user_id: str,
     email: str,
@@ -58,7 +74,6 @@ def create_access_token(
         else settings.jwt_expire_minutes * 60
     )
     now = int(time.time())
-    header = {"alg": "HS256", "typ": "JWT"}
     payload = {
         "sub": user_id,
         "email": email,
@@ -67,17 +82,7 @@ def create_access_token(
         "iat": now,
         "exp": now + ttl,
     }
-    header_b64 = _b64url_encode(json.dumps(header, separators=(",", ":")).encode("utf-8"))
-    payload_b64 = _b64url_encode(
-        json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    )
-    signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
-    signature = hmac.new(
-        settings.jwt_secret_key.encode("utf-8"),
-        signing_input,
-        hashlib.sha256,
-    ).digest()
-    return f"{header_b64}.{payload_b64}.{_b64url_encode(signature)}"
+    return _sign_jwt_payload(payload)
 
 
 def verify_access_token(token: str) -> dict[str, Any]:
@@ -126,14 +131,47 @@ def verify_access_token(token: str) -> dict[str, Any]:
     return payload
 
 
-def create_oauth_state(provider: str) -> str:
-    return create_access_token(
-        user_id=f"oauth_state_{provider}",
-        email="state@careerradar.local",
-        display_name=provider,
-        provider=provider,
-        expires_in_seconds=600,
-    )
+def create_oauth_state(provider: str, redirect_uri: str | None = None) -> str:
+    now = int(time.time())
+    payload: dict[str, Any] = {
+        "sub": f"oauth_state_{provider}",
+        "email": "state@careerradar.local",
+        "name": provider,
+        "provider": provider,
+        "purpose": "oauth_state",
+        "nonce": secrets.token_urlsafe(16),
+        "iat": now,
+        "exp": now + 600,
+    }
+    if redirect_uri and redirect_uri.strip():
+        payload["redirect_uri"] = redirect_uri.strip()
+    return _sign_jwt_payload(payload)
+
+
+def verify_oauth_state(state_token: str | None, expected_provider: str) -> dict[str, Any]:
+    if not state_token or not state_token.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing OAuth state parameter (CSRF check failed).",
+        )
+    try:
+        claims = verify_access_token(state_token.strip())
+    except HTTPException as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired OAuth state parameter.",
+        ) from exc
+
+    if (
+        claims.get("sub") != f"oauth_state_{expected_provider}"
+        or claims.get("provider") != expected_provider
+        or claims.get("purpose") != "oauth_state"
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="OAuth state validation failed (CSRF check).",
+        )
+    return claims
 
 
 def extract_session_token(
