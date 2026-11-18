@@ -29,6 +29,8 @@ import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { ErrorState, LoadingState } from '@/components/ui/StateFeedback';
 import {
+  ALL_DOMAIN_CATEGORIES,
+  ALL_ROLE_CATEGORIES,
   COUNTRY_CITY_SUGGESTIONS,
   NATIVE_COUNTRY_OPTIONS,
   ROLE_CATEGORY_LABELS,
@@ -66,26 +68,6 @@ const profileFormSchema = z.object({
 });
 
 type ProfileFormValues = z.infer<typeof profileFormSchema>;
-
-const ALL_ROLES: RoleCategory[] = [
-  'software_engineering',
-  'machine_learning',
-  'systems_infrastructure',
-  'data_science',
-  'security',
-  'research',
-];
-
-const ALL_DOMAINS: DomainCategory[] = [
-  'Developer Tools & Cloud',
-  'AI & Machine Learning',
-  'Distributed Systems',
-  'Fintech & Payments',
-  'Cybersecurity',
-  'Open Source Ecosystem',
-  'Data Engineering',
-  'Scientific Computing',
-];
 
 const ALL_WORK_MODES: WorkMode[] = ['remote', 'hybrid', 'onsite'];
 
@@ -585,7 +567,7 @@ export function ProfilePage() {
                     Preferred Role Categories
                   </span>
                   <div className="flex flex-wrap gap-2">
-                    {ALL_ROLES.map((role) => {
+                    {ALL_ROLE_CATEGORIES.map((role) => {
                       const active = preferredRoles.includes(role);
                       return (
                         <button
@@ -606,10 +588,10 @@ export function ProfilePage() {
 
                 <div>
                   <span className="block text-xs font-semibold text-slate-700 mb-2">
-                    Preferred Technical Domains
+                    Preferred Domains (Software, Engineering, Product, Design &amp; Business)
                   </span>
                   <div className="flex flex-wrap gap-2">
-                    {ALL_DOMAINS.map((domain) => {
+                    {Array.from(new Set([...ALL_DOMAIN_CATEGORIES, ...preferredDomains])).map((domain) => {
                       const active = preferredDomains.includes(domain);
                       return (
                         <button

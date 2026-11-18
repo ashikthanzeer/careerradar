@@ -339,12 +339,26 @@ def _matches_terms(title: str, description: str, query_terms: list[str]) -> bool
             "scientist",
             "analyst",
             "security",
+            "designer",
+            "product",
+            "hardware",
+            "robotics",
         )
     )
 
 
 def _infer_role(title: str, fallback: str) -> str:
     t = title.lower()
+    if any(k in t for k in ("verilog", "vlsi", "fpga", "embedded", "firmware", "hardware", "robotics", "mechanical", "electrical", "solidworks")):
+        return "core_engineering"
+    if any(k in t for k in ("ui/ux", "ux design", "ui design", "product design", "interaction design", "designer")):
+        return "ui_ux_design"
+    if any(k in t for k in ("product manager", "product management", "associate product", "apm")):
+        return "product_management"
+    if any(k in t for k in ("quant", "financial", "investment", "risk analyst", "business analyst", "equity")):
+        return "finance_business"
+    if any(k in t for k in ("marketing", "growth", "seo", "operations", "supply chain")):
+        return "marketing_operations"
     if any(k in t for k in ("machine learning", "ml ", "ai ", "llm", "deep learning")):
         return "machine_learning"
     if any(k in t for k in ("data scien", "data engineer", "analytics")):
@@ -555,6 +569,20 @@ def fetch_tier1_company_jobs(
 
 def _infer_domain(title: str, desc: str) -> str:
     blob = f"{title} {desc[:1000]}".lower()
+    if any(k in blob for k in ("verilog", "vlsi", "fpga", "embedded", "firmware", "robotics")):
+        return "Embedded, Robotics & VLSI"
+    if any(k in blob for k in ("solidworks", "autocad", "ansys", "mechanical", "civil engineering")):
+        return "Mechanical, Civil & Core Engineering"
+    if any(k in blob for k in ("ui/ux", "ux design", "ui design", "product design", "figma")):
+        return "UI/UX & Product Design"
+    if any(k in blob for k in ("product manager", "product management", "product strategy")):
+        return "Product & Strategy"
+    if any(k in blob for k in ("financial modeling", "valuation", "quant", "corporate finance")):
+        return "Quantitative Finance & Consulting"
+    if any(k in blob for k in ("digital marketing", "seo", "growth analytics", "supply chain")):
+        return "Growth, Marketing & Operations"
+    if any(k in blob for k in ("bioinformatics", "biotechnology", "biomedical")):
+        return "Biotech & Healthcare Tech"
     if any(k in blob for k in ("machine learning", "ml ", "ai ", "pytorch", "llm", "rag")):
         return "AI & Machine Learning"
     if any(k in blob for k in ("data scien", "data engineer", "analytics", "pandas")):
@@ -584,13 +612,19 @@ def fetch_internshala_internships(
         "systems_infrastructure": "cloud-computing-internship",
         "research": "computer-science-internship",
         "software_engineering": "software-development-internship",
+        "product_management": "product-management-internship",
+        "ui_ux_design": "ui-ux-design-internship",
+        "core_engineering": "embedded-systems-internship",
+        "finance_business": "finance-internship",
+        "marketing_operations": "digital-marketing-internship",
     }
-    categories = list(
-        dict.fromkeys(
-            [slug_map.get(r, "software-development-internship") for r in preferred_roles]
-            + ["software-development-internship", "computer-science-internship"]
-        )
-    )[:2]
+    preferred_slugs = [slug_map.get(r, "software-development-internship") for r in preferred_roles if r in slug_map]
+    fallback_slugs = (
+        ["software-development-internship", "computer-science-internship"]
+        if not preferred_slugs
+        else []
+    )
+    categories = list(dict.fromkeys([*preferred_slugs, *fallback_slugs]))[:2]
 
     items: list[RawFeedItemSchema] = []
     sources: list[str] = []

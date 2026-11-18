@@ -19,7 +19,12 @@ export type RoleCategory =
   | 'data_science'
   | 'systems_infrastructure'
   | 'security'
-  | 'research';
+  | 'research'
+  | 'product_management'
+  | 'ui_ux_design'
+  | 'core_engineering'
+  | 'finance_business'
+  | 'marketing_operations';
 
 export type DomainCategory =
   | 'Developer Tools & Cloud'
@@ -29,7 +34,15 @@ export type DomainCategory =
   | 'Cybersecurity'
   | 'Scientific Computing'
   | 'Open Source Ecosystem'
-  | 'Data Engineering';
+  | 'Data Engineering'
+  | 'Product & Strategy'
+  | 'UI/UX & Product Design'
+  | 'Embedded, Robotics & VLSI'
+  | 'Mechanical, Civil & Core Engineering'
+  | 'Quantitative Finance & Consulting'
+  | 'Growth, Marketing & Operations'
+  | 'Biotech & Healthcare Tech'
+  | (string & {});
 
 export type OpportunityStatus = 'open' | 'closing_soon' | 'expired' | 'unverified_status';
 

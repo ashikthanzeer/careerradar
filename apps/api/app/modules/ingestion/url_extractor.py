@@ -42,6 +42,16 @@ def _detect_source_platform(host: str) -> str:
 
 def _infer_role_and_domain(text: str) -> tuple[str, str]:
     lower = text.lower()
+    if any(k in lower for k in ("verilog", "vlsi", "fpga", "embedded", "firmware", "robotics", "solidworks", "autocad", "mechanical", "hardware")):
+        return "core_engineering", "Embedded, Robotics & VLSI"
+    if any(k in lower for k in ("ui/ux", "ux design", "ui design", "product design", "figma", "wireframing", "prototyping")):
+        return "ui_ux_design", "UI/UX & Product Design"
+    if any(k in lower for k in ("product manager", "product management", "associate product", "apm", "product strategy")):
+        return "product_management", "Product & Strategy"
+    if any(k in lower for k in ("financial modeling", "valuation", "quantitative", "equity research", "investment banking", "business analyst")):
+        return "finance_business", "Quantitative Finance & Consulting"
+    if any(k in lower for k in ("digital marketing", "seo", "sem", "growth analytics", "supply chain", "operations intern")):
+        return "marketing_operations", "Growth, Marketing & Operations"
     if any(k in lower for k in ("machine learning", "pytorch", "tensorflow", "llm", "ai ", "rag")):
         return "machine_learning", "AI & Machine Learning"
     if any(k in lower for k in ("data scientist", "data analyst", "analytics", "pandas")):
@@ -50,6 +60,8 @@ def _infer_role_and_domain(text: str) -> tuple[str, str]:
         return "security", "Cybersecurity"
     if any(k in lower for k in ("kubernetes", "devops", "sre", "cloud", "terraform", "linux kernel")):
         return "systems_infrastructure", "Developer Tools & Cloud"
+    if any(k in lower for k in ("bioinformatics", "biotech", "biomedical", "genomics")):
+        return "research", "Biotech & Healthcare Tech"
     if any(k in lower for k in ("research", "fellowship", "lab")):
         return "research", "Scientific Computing"
     return "software_engineering", "Developer Tools & Cloud"

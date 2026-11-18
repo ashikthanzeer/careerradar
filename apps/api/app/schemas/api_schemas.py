@@ -14,6 +14,11 @@ RoleCategory = Literal[
     "systems_infrastructure",
     "security",
     "research",
+    "product_management",
+    "ui_ux_design",
+    "core_engineering",
+    "finance_business",
+    "marketing_operations",
 ]
 TrustLabel = Literal[
     "no_major_warnings",

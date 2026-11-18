@@ -8,6 +8,7 @@ import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
 import { Button } from '@/components/ui/Button';
+import { ALL_ROLE_CATEGORIES, ROLE_CATEGORY_LABELS } from '@/lib/utils';
 import type { CreateOpportunityInput } from '@/types/domain';
 
 const createOpportunitySchema = z.object({
@@ -42,17 +43,13 @@ const createOpportunitySchema = z.object({
     'systems_infrastructure',
     'security',
     'research',
+    'product_management',
+    'ui_ux_design',
+    'core_engineering',
+    'finance_business',
+    'marketing_operations',
   ]),
-  domain: z.enum([
-    'Developer Tools & Cloud',
-    'AI & Machine Learning',
-    'Distributed Systems',
-    'Fintech & Payments',
-    'Cybersecurity',
-    'Scientific Computing',
-    'Open Source Ecosystem',
-    'Data Engineering',
-  ]),
+  domain: z.string().min(2, 'Domain is required'),
   location: z.string().min(2, 'Location is required'),
   workMode: z.enum(['remote', 'hybrid', 'onsite', 'unknown']),
   compensationMin: z.string().optional(),
@@ -360,12 +357,11 @@ export function SubmitOpportunityModal({
             error={errors.roleCategory?.message}
             {...register('roleCategory')}
           >
-            <option value="software_engineering">Software Engineering</option>
-            <option value="machine_learning">AI &amp; Machine Learning</option>
-            <option value="data_science">Data Science &amp; Analytics</option>
-            <option value="systems_infrastructure">Cloud &amp; DevOps</option>
-            <option value="security">Cybersecurity</option>
-            <option value="research">Research</option>
+            {ALL_ROLE_CATEGORIES.map((roleKey) => (
+              <option key={roleKey} value={roleKey}>
+                {ROLE_CATEGORY_LABELS[roleKey]}
+              </option>
+            ))}
           </Select>
 
           <Select

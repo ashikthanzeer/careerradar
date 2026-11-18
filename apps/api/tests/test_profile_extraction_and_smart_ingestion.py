@@ -760,4 +760,107 @@ def test_zero_hallucination_rejects_generic_urls_and_verifies_live_status(
     assert listed_after["total"] == 0
 
 
+def test_universal_pdf_parser_and_multidomain_extraction(client: TestClient) -> None:
+    """
+    Verifies:
+    1. 3-tier PDF extractor decodes FlateDecode compressed LaTeX/Canva/Word PDFs with
+       TJ kerning splits ([(V) -15 (eri) 10 (log)] TJ), ToUnicode CMap hex glyph streams,
+       ligatures, and hyphenated line breaks.
+    2. Scanned/empty PDFs fail gracefully with an informative prompt instead of raw PDF bytes.
+    3. Non-CS resumes (Hardware/VLSI, UI/UX Design, Product Management, Quantitative Finance)
+       are accurately extracted into non-CS RoleCategory & Domain tracks.
+    4. Multi-domain early-career ingestion admits hardware, UI/UX, and PM internships while
+       still blocking senior non-career commercial roles.
+    """
+    import zlib
+    from app.modules.ingestion.normalizer import is_technical_career_role
+    from app.modules.profile.extractor import _extract_pdf_text
+
+    # 1. FlateDecode compressed LaTeX-style PDF with TJ kerning + ToUnicode CMap hex glyphs
+    cmap_stream = zlib.compress(
+        b"beginbfchar\n"
+        b"<0001> <0046>\n"
+        b"<0002> <0069>\n"
+        b"<0003> <0067>\n"
+        b"<0004> <006D>\n"
+        b"<0005> <0061>\n"
+        b"endbfchar\n"
+    )
+    content_stream = zlib.compress(
+        b"BT\n"
+        b"/F1 11 Tf\n"
+        b"[(V) -20 (eri) 10 (log) -220 (F) -15 (PGA) -240 (E) -10 (mbedded) -220 (Sys) 5 (tems)] TJ\n"
+        b"<00010002000300040005> Tj\n"
+        b"(B.Tech Electronics and Communication Engineering, NIT Calicut 2027) Tj\n"
+        b"(MATLAB, SolidWorks, Product Management, Financial Modeling, User Re-\nsearch, Digital Marketing) Tj\n"
+        b"ET\n"
+    )
+    fake_pdf = (
+        b"%PDF-1.4\n1 0 obj << /Length 100 >> stream\n"
+        + cmap_stream
+        + b"\nendstream\nendobj\n2 0 obj << /Filter /FlateDecode >> stream\n"
+        + content_stream
+        + b"\nendstream\nendobj\n%%EOF"
+    )
+    extracted_text = _extract_pdf_text(fake_pdf)
+    assert "Verilog" in extracted_text
+    assert "FPGA" in extracted_text
+    assert "Embedded Systems" in extracted_text
+    assert "Figma" in extracted_text
+    assert "User Research" in extracted_text
+
+    headers = login_with_oauth(client, provider="google", email="vlsi.design@gmail.com")
+    res = client.post(
+        "/api/v1/profile/extract-resume",
+        headers=headers,
+        json={
+            "filename": "ananya_hardware_pm.pdf",
+            "fileBase64": base64.b64encode(fake_pdf).decode("ascii"),
+        },
+    )
+    assert res.status_code == 200
+    body = res.json()
+    extracted_skill_names = {s["canonicalName"] for s in body["skills"]}
+    assert {
+        "Verilog",
+        "FPGA",
+        "Embedded Systems",
+        "Figma",
+        "User Research",
+        "MATLAB",
+        "SolidWorks",
+        "Product Management",
+        "Financial Modeling",
+    }.issubset(extracted_skill_names)
+    assert "core_engineering" in body["preferredRoles"]
+    assert "ui_ux_design" in body["preferredRoles"]
+    assert "product_management" in body["preferredRoles"]
+    assert "finance_business" in body["preferredRoles"]
+    assert "Embedded, Robotics & VLSI" in body["preferredDomains"]
+    assert "UI/UX & Product Design" in body["preferredDomains"]
+    assert body["fieldOfStudy"] == "Electrical & Electronics Engineering"
+
+    # 2. Scanned image-only PDF fails cleanly with empty skills & actionable notice
+    scanned_pdf = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF"
+    scanned_res = client.post(
+        "/api/v1/profile/extract-resume",
+        headers=headers,
+        json={
+            "filename": "scanned_cv.pdf",
+            "fileBase64": base64.b64encode(scanned_pdf).decode("ascii"),
+        },
+    )
+    assert scanned_res.status_code == 200
+    assert scanned_res.json()["skills"] == []
+    assert "scanned" in scanned_res.json()["extractionNotice"].lower()
+
+    # 3. Non-CS early-career roles admitted during ingestion while commercial execs stay filtered
+    assert is_technical_career_role("VLSI Design Intern") is True
+    assert is_technical_career_role("UI/UX Product Designer Intern") is True
+    assert is_technical_career_role("Associate Product Management Intern") is True
+    assert is_technical_career_role("Quantitative Financial Analyst Intern") is True
+    assert is_technical_career_role("Market Access (Senior) Manager, EU Center") is False
+
+
+
 

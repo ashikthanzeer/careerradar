@@ -202,7 +202,13 @@ TECHNICAL_ROLE_PATTERN = re.compile(
     r"\b(?:software|engineer|developer|programmer|data|machine\s+learning|ml|ai|"
     r"security|cyber|appsec|infosec|systems|cloud|devops|sre|frontend|backend|"
     r"full\s*stack|fullstack|mobile|ios|android|platform|research|intern|internship|"
-    r"fellowship|python|typescript|react|rust|golang|kubernetes|distributed|quant)\b",
+    r"fellowship|python|typescript|react|rust|golang|kubernetes|distributed|quant|"
+    r"quantitative|product\s+manag(?:er|ement)|apm|associate\s+product|"
+    r"ui/ux|ux\s+design(?:er)?|ui\s+design(?:er)?|product\s+design(?:er)?|"
+    r"interaction\s+design(?:er)?|embedded|vlsi|fpga|asic|silicon|firmware|"
+    r"robotics|hardware|mechatronics|financial\s+analyst|risk\s+analyst|"
+    r"business\s+analyst|equity\s+research|growth\s+(?:analyst|intern)|"
+    r"marketing\s+intern|operations\s+intern|supply\s+chain|bioinformatics|biotech)\b",
     re.IGNORECASE,
 )
 

@@ -48,6 +48,16 @@ def _strip_tags(raw: str) -> str:
 
 def _map_role_and_domain(title: str, tags: list[str]) -> tuple[str, str]:
     blob = f"{title} {' '.join(str(t) for t in tags)}".lower()
+    if any(k in blob for k in ("verilog", "vlsi", "fpga", "embedded", "firmware", "hardware", "robotics", "mechanical", "solidworks", "autocad")):
+        return "core_engineering", "Embedded, Robotics & VLSI"
+    if any(k in blob for k in ("ui/ux", "ux design", "ui design", "product design", "figma", "wireframing")):
+        return "ui_ux_design", "UI/UX & Product Design"
+    if any(k in blob for k in ("product manager", "product management", "associate product", "apm", "product strategy")):
+        return "product_management", "Product & Strategy"
+    if any(k in blob for k in ("quant", "financial modeling", "valuation", "equity research", "business analyst", "finance")):
+        return "finance_business", "Quantitative Finance & Consulting"
+    if any(k in blob for k in ("digital marketing", "seo", "growth", "supply chain", "operations", "marketing")):
+        return "marketing_operations", "Growth, Marketing & Operations"
     if any(k in blob for k in ("machine learning", "ai", "ml ", "pytorch", "llm")):
         return "machine_learning", "AI & Machine Learning"
     if any(k in blob for k in ("security", "cyber", "infosec", "appsec")):
@@ -56,6 +66,8 @@ def _map_role_and_domain(title: str, tags: list[str]) -> tuple[str, str]:
         return "systems_infrastructure", "Developer Tools & Cloud"
     if any(k in blob for k in ("data scien", "data engineer", "analytics", "sql")):
         return "data_science", "Data Engineering"
+    if any(k in blob for k in ("bioinformatics", "biotech", "biomedical", "genomics")):
+        return "research", "Biotech & Healthcare Tech"
     return "software_engineering", "Developer Tools & Cloud"
 
 
@@ -189,6 +201,11 @@ def _derive_profile_search_context(
             "systems_infrastructure": "systems",
             "security": "security",
             "research": "research",
+            "product_management": "product",
+            "ui_ux_design": "design",
+            "core_engineering": "embedded hardware robotics",
+            "finance_business": "finance analyst",
+            "marketing_operations": "growth marketing operations",
         }
         primary_role = role_keywords.get(
             preferred_roles[0] if preferred_roles else "software_engineering", "software"
@@ -395,22 +412,42 @@ def fetch_live_public_jobs(
         except Exception as exc:
             warnings.append(f"Arbeitnow API unavailable ({type(exc).__name__})")
 
-        # 4. The Muse Public API
-        muse_queries = (
-            [
-                {"category": "Software Engineering", "location": "Bengaluru, India", "page": 1},
-                {"category": "Software Engineering", "location": "Hyderabad, India", "page": 1},
-                {"category": "Software Engineering", "location": "Mumbai, India", "page": 1},
-                {"category": "Software Engineering", "location": "Flexible / Remote", "page": 1},
-                {"category": "Data Science", "location": "Flexible / Remote", "page": 1},
-                {"category": "Software Engineering", "page": 1},
+        # 4. The Muse Public API (dynamically aligned to user's extracted role tracks)
+        muse_category_map = {
+            "software_engineering": "Software Engineering",
+            "machine_learning": "Data Science",
+            "data_science": "Data Science",
+            "systems_infrastructure": "Software Engineering",
+            "security": "IT",
+            "research": "Science and Engineering",
+            "product_management": "Product Management",
+            "ui_ux_design": "Design",
+            "core_engineering": "Mechanical Engineering",
+            "finance_business": "Finance",
+            "marketing_operations": "Marketing",
+        }
+        primary_muse_cats = list(
+            dict.fromkeys([muse_category_map.get(r, "Software Engineering") for r in roles])
+        )[:2] or ["Software Engineering"]
+
+        if native_country.strip().lower() == "india":
+            muse_queries = [
+                {"category": primary_muse_cats[0], "location": "Bengaluru, India", "page": 1},
+                {"category": primary_muse_cats[0], "location": "Hyderabad, India", "page": 1},
+                {"category": primary_muse_cats[0], "location": "Mumbai, India", "page": 1},
+                {"category": primary_muse_cats[0], "location": "Flexible / Remote", "page": 1},
+                {
+                    "category": primary_muse_cats[-1],
+                    "location": "Flexible / Remote",
+                    "page": 1,
+                },
+                {"category": primary_muse_cats[0], "page": 1},
             ]
-            if native_country.strip().lower() == "india"
-            else [
-                {"category": "Software Engineering", "location": "Flexible / Remote", "page": 1},
-                {"category": "Software Engineering", "page": 1},
+        else:
+            muse_queries = [
+                {"category": primary_muse_cats[0], "location": "Flexible / Remote", "page": 1},
+                {"category": primary_muse_cats[-1], "page": 1},
             ]
-        )
         muse_added = 0
         for m_params in muse_queries:
             if muse_added >= 30:

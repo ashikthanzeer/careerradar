@@ -33,6 +33,10 @@ import {
   SubmitOpportunityModal,
   type JobPrefillData,
 } from './SubmitOpportunityModal';
+import {
+  ALL_ROLE_CATEGORIES,
+  ROLE_CATEGORY_LABELS,
+} from '@/lib/utils';
 import type {
   CreateOpportunityInput,
   OpportunityFilterParams,
@@ -480,12 +484,11 @@ export function DiscoveryPage() {
             onChange={(e) => updateParam('roleCategory', e.target.value)}
           >
             <option value="all">All Role Areas</option>
-            <option value="software_engineering">Software Engineering</option>
-            <option value="machine_learning">AI &amp; Machine Learning</option>
-            <option value="systems_infrastructure">Cloud &amp; DevOps</option>
-            <option value="data_science">Data Science &amp; Analytics</option>
-            <option value="security">Cybersecurity</option>
-            <option value="research">Research</option>
+            {ALL_ROLE_CATEGORIES.map((roleKey) => (
+              <option key={roleKey} value={roleKey}>
+                {ROLE_CATEGORY_LABELS[roleKey]}
+              </option>
+            ))}
           </Select>
 
           <Select

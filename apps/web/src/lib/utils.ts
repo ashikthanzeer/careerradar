@@ -116,8 +116,45 @@ export const ROLE_CATEGORY_LABELS: Record<RoleCategory, string> = {
   data_science: 'Data Science & Analytics',
   systems_infrastructure: 'Systems & Cloud Infrastructure',
   security: 'Security Engineering',
-  research: 'Computer Science Research',
+  research: 'Research & R&D',
+  product_management: 'Product Management',
+  ui_ux_design: 'UI/UX & Product Design',
+  core_engineering: 'Core / Hardware / Embedded',
+  finance_business: 'Finance, Quant & Consulting',
+  marketing_operations: 'Growth, Marketing & Ops',
 };
+
+export const ALL_ROLE_CATEGORIES: RoleCategory[] = [
+  'software_engineering',
+  'machine_learning',
+  'systems_infrastructure',
+  'data_science',
+  'security',
+  'research',
+  'product_management',
+  'ui_ux_design',
+  'core_engineering',
+  'finance_business',
+  'marketing_operations',
+];
+
+export const ALL_DOMAIN_CATEGORIES: string[] = [
+  'Developer Tools & Cloud',
+  'AI & Machine Learning',
+  'Distributed Systems',
+  'Fintech & Payments',
+  'Cybersecurity',
+  'Data Engineering',
+  'Open Source Ecosystem',
+  'Scientific Computing',
+  'Product & Strategy',
+  'UI/UX & Product Design',
+  'Embedded, Robotics & VLSI',
+  'Mechanical, Civil & Core Engineering',
+  'Quantitative Finance & Consulting',
+  'Growth, Marketing & Operations',
+  'Biotech & Healthcare Tech',
+];
 
 export const OPPORTUNITY_TYPE_LABELS: Record<OpportunityType, string> = {
   internship: 'Internship',
